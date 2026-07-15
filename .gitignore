@@ -1,0 +1,32 @@
+# Build outputs
+bin/
+dispatcher/build/
+
+# Go build cache / test binaries
+*.test
+*.out
+
+# Generated pkg-config (rendered from pkgconfig/vppcom.pc.in by `make pc`)
+pkgconfig/vppcom.pc
+
+# C build intermediates
+*.o
+*.a
+*.so
+*.so.*
+
+# Editor / tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Test/log scratch
+/tmp/vclgo-smoke/
+/tmp/vclgo-concurrency/
+*.log
