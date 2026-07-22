@@ -17,7 +17,7 @@ if [ ! -e "$VCLGO_GUM_LIB" ]; then
     echo "Build first: make -C $VCLGO_REPO/preload/fastpath gum_vcl" >&2
     exit 2
 fi
-# G-D1: `spawn_bg` reaches `run_fastpath` through a fresh `bash -c` subshell,
+# `spawn_bg` reaches `run_fastpath` through a fresh `bash -c` subshell,
 # which only inherits *exported* variables. `run_fastpath` reads $VCLGO_GUM_LIB
 # to populate LD_PRELOAD; if that variable is not exported the server child
 # sees LD_PRELOAD="" and falls through to the raw kernel path — leaving the
@@ -138,12 +138,9 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "[smoke-fp] running fastpath client"
-# NOTE: do NOT wrap with `timeout` here — timeout is a non-Go binary
-# that our preload happily loads into (finding nothing to patch) but
-# every LD_PRELOAD-triggered vclgo_init registers with VPP. When
-# `timeout` execs echo_client, echo_client's VCL init collides with
-# the still-registered session from `timeout` and segfaults. We rely
-# on the surrounding shell trap to reap runaways instead.
+# Keep this smallest smoke path free of an extra wrapper process. The
+# constructor now recognizes non-Go helpers before VCL initialization, so
+# timeout is safe where the longer stress harnesses need it.
 if run_fastpath \
     "$VCLGO_BIN/examples/echo_client" \
     -addr "127.0.0.1:$PORT" -conc 4 -msgs 8 -size 1024 \

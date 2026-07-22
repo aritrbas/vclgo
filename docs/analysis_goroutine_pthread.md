@@ -51,10 +51,6 @@ The source M waits only for one nonblocking owner operation. If the operation
 returns `EAGAIN`, Go resumes its normal netpoll path and can park thousands
 of goroutines without creating thousands of owners.
 
-Approach #3 inserts a seccomp notifier before the same owner pool. That
-notifier layer is absent from Approach #4 and must not appear in fastpath
-capacity calculations.
-
 ## Four independent scheduling layers
 
 | Layer | Unit | Selection |
@@ -118,7 +114,7 @@ The patched syscall starts on a goroutine stack, but the shim switches
 `%rsp` to a 512 KiB pthread-local stack before C dispatch. A second
 goroutine on another M has a different dispatcher stack. The shim explicitly
 marshals Linux syscall registers to SysV arguments and returns a packed
-result; it never asks a JavaScript callback to mutate a live Go CPU context.
+result. No callback edits a suspended Go register context.
 
 Signals can arrive at any point. The design requires every return PC visible
 on the goroutine stack to remain in Go text and every native frame to live on

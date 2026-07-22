@@ -1,5 +1,11 @@
 # Why Frida Interceptor was dropped
 
+> **Archived Approach #2 design record.** This backend and every file path
+> associated with it have been removed from the build. Do not use this
+> document as current setup, API, or status guidance. The shipping native
+> Frida-Gum design is documented in
+> [the current architecture](../../architecture.md).
+
 **Audience:** engineers and reviewers who ask *"can't we just use Frida?"* This
 doc is designed to be shared standalone. It uses concrete failure examples,
 memory-layout diagrams, and objdump-style output rather than a wall of prose.
@@ -22,7 +28,7 @@ is the current implementation focus.
 For the retirement audit trail with individual defect IDs, see
 [`phase1_frida.md`](phase1_frida.md).  For the currently-supported
 alternative that gives us the same "no source changes" property, see
-[`architecture_fastpath.md`](architecture_fastpath.md).
+[`architecture.md`](../../architecture.md).
 
 ---
 
@@ -36,7 +42,7 @@ meetings.
 |-------|------|-----------|----------------|
 | 1 | **Frida CLI / `frida-tools`** | The `frida`, `frida-trace`, `frida-ps` command-line tools. Spawn/attach processes, load JS agents. | **No.** Discussed and rejected. |
 | 2 | **Frida `Interceptor.attach`** | High-level JavaScript API from a loaded agent: `Interceptor.attach(addr, { onEnter, onLeave })`. Puts a JS callback on function entry/exit. | **No.  This is what this document is about.** |
-| 3 | **`frida-gum`** | The underlying C library. Bundles Capstone. Provides memory allocation near a target, atomic RX-page splicing, module/symbol iteration. | **Yes** — as a library, not as a framework. See [`architecture_fastpath.md`](architecture_fastpath.md). |
+| 3 | **`frida-gum`** | The underlying C library. Bundles Capstone. Provides memory allocation near a target, atomic RX-page splicing, module/symbol iteration. | **Yes** — as a library, not as a framework. See [the current architecture](../../architecture.md). |
 
 When this document says "Frida", it means #2: `Interceptor.attach`.
 
@@ -514,7 +520,7 @@ longer Frida:
 Combine all five fixes and you have written a **native C dispatcher +
 static syscall-site rewriter with hand-rolled trampolines**.  That is
 approach D, and we already have it — see
-[`architecture_fastpath.md`](architecture_fastpath.md).  Frida-gum (the
+[`architecture.md`](../../architecture.md). Frida-Gum (the
 C library) is used by that path for the mechanical parts (Capstone
 disassembly + safe RX-page splicing), which is exactly what a C library
 is for.  Frida the framework (JS agent + Interceptor) is not used.
@@ -540,13 +546,14 @@ Frida `Interceptor.attach`, use this table.
 
 ## 9. Further reading
 
-- [`architecture_fastpath.md`](architecture_fastpath.md) — byte-level
+- [`architecture.md`](../../architecture.md) — current end-to-end
   design of the current in-process rewriter that solves each of §2–§6
   above using `frida-gum` as a plain C library.
-- [`architecture.md`](architecture.md) — the seccomp path that solves
+- [`../seccomp/architecture.md`](../seccomp/architecture.md) — archived
+  kernel-notification design that solved
   the same problems by moving the work into a kernel-mediated
   notification.
-- [`comparison_approaches.md`](comparison_approaches.md) — comparison
+- [`../approach_comparison.md`](../approach_comparison.md) — archived comparison
   of all four approaches (vclnet source-level, retired Frida
   Interceptor, seccomp, fastpath).
 - [`phase1_frida.md`](phase1_frida.md) — the retirement audit trail,
@@ -563,5 +570,5 @@ which means: no in-tramp return addresses on the goroutine stack, no
 foreign frames of unbounded depth on the goroutine stack, no register
 mutation without knowing Go's internal ABI at that exact call site,
 real kernel fds returned to Go, and permanent per-session pthread
-ownership.  Approach C (seccomp) and approach D (fastpath) both satisfy
-those requirements.  Frida's Interceptor cannot.
+ownership. The current native Frida-Gum design satisfies those requirements;
+Frida's high-level Interceptor mechanism cannot.

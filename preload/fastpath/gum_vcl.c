@@ -1,52 +1,44 @@
 /*
  * gum_vcl.c — fastpath preload wired to the vclgo dispatcher.
  *
- * Combined M3b+M3c+M3d shipping library. Descended from the M1..M3a
- * bring-up milestones (probe_sites → gum_probe → gum_m2 → gum_m25 →
- * gum_full → gum_m3, all removed from the tree; see
- * docs/architecture_diagrams_fastpath.md for the design record). It
- * combines the M2 immediate-NR SYSCALL-site patcher and the M2.5
- * function-entry patcher for the three generic Go syscall wrappers,
- * and adds the real dispatch machinery:
+ * Shipping Approach #4 preload. It combines an immediate-NR SYSCALL-site
+ * patcher with function-entry patches for the three generic Go syscall
+ * wrappers and the native dispatch machinery:
  *
- *   - New: a Syscall6-specific trampoline that converts Go's internal
- *     ABI (a0..a5 in rbx/rcx/rdi/rsi/r8/r9, NR in rax) into the SysV
+ *   - A Syscall6-specific trampoline converts Go's internal
+ *     ABI (a0..a5 in rbx/rcx/rdi/rsi/r8/r9, NR in rax) into the Linux
  *     syscall ABI (a0..a5 in rdi/rsi/rdx/r10/r8/r9), calls a shared
  *     C dispatcher, and JMPs back into Syscall6's own result-translation
  *     code so the wrapper's Go-ABI return convention (rax=result,
  *     rbx=result2, rcx=errno) is reconstructed for free.
  *
- *   - New: a C dispatcher `vclgo_dispatch` that mirrors the routing
- *     switch of the retired seccomp preload 1:1 — checks
- *     vclgo_owns_fd(a0), routes owned fds to the vclgo_XXX POSIX-shaped
- *     APIs in libvclgo_dispatcher.so, and executes a raw kernel syscall
- *     otherwise. Returns __int128 so the kernel's rdx (result2) survives
- *     the C round-trip on the small set of syscalls that use it (pipe,
- *     fork, etc.).
+ *   - A C dispatcher `vclgo_dispatch` checks vclgo_owns_fd(a0), routes
+ *     owned fds to the vclgo_XXX POSIX-shaped APIs in
+ *     libvclgo_dispatcher.so, and executes a raw kernel syscall otherwise.
+ *     It returns __int128 so the kernel's rdx (result2) survives the C
+ *     round-trip on the small set of syscalls that use it.
  *
- *   - New: init/teardown lifecycle. Ctor calls vclgo_init("vclgo-fastpath")
+ *   - The constructor calls vclgo_init("vclgo-fastpath")
  *     to bootstrap the VCL app + permanent owner-worker pool. If VCL
  *     reports passthrough (VCL_CONFIG unset), patches are still installed
  *     for observability but the dispatcher's owns_fd check always fails
  *     and everything falls through to raw syscall — semantically a no-op
  *     for the app. Dtor calls vclgo_teardown().
  *
- * Everything else — M2 site scan/patch and M2.5 wrapper detour — is
- * the same identity-passthrough logic that was verified in the removed
- * gum_full milestone. gum_init_embedded() is called exactly once
- * because it is not re-entrant.
+ * gum_init_embedded() is called exactly once because it is not re-entrant.
  *
- * The M2 shim from M3a is reused unchanged. It doesn't restore
- * rdi/rsi/rdx/r10/r8/r9 after the C call, which is fine because Go's
- * ABI0 inline SYSCALL wrappers reload their args from the stack before
- * the syscall and never read them again after (verified against
- * runtime.futex.abi0). The shim also naturally preserves whatever the
+ * The shared shim does not restore the SysV caller-saved argument
+ * registers after the C call. Syscall6's original result block does not
+ * consume them. Immediate-site compatibility requires each recognized Go
+ * continuation to avoid relying on those registers; that assumption must
+ * be revalidated for every supported Go version. The shim naturally
+ * preserves whatever the
  * dispatcher put into rdx (as the high 64 bits of an __int128 return),
- * so a shared shim serves both M2 sites and the Syscall6 wrapper.
+ * so a shared shim serves both immediate sites and the Syscall6 wrapper.
  *
  * Stack invariant (critical for Go's unwinder):
  * -------------------------------------------------------------
- * From M2 sites the shim is entered via `call rel32 -> tramp` at the
+ * From immediate sites the shim is entered via `call rel32 -> tramp` at the
  * SITE, followed by `mov+jmp shim` inside the tramp. The return
  * address on the stack is the site's `NOPs` slot — a valid Go PC.
  *
@@ -64,8 +56,7 @@
  * calls (connect, read, write on a routed socket) make that window
  * wide enough that the crash was reliably reproducible.
  *
- * Not on the fastpath (left identity-passthrough, same as the removed
- * gum_full milestone):
+ * Left as identity-passthrough:
  *   - rawSyscallNoError.abi0 (used only for no-error syscalls like
  *     getpid/getuid — not network)
  *   - rawVforkSyscall.abi0 (used only for vfork/exec — not network)
@@ -109,12 +100,8 @@ static _Atomic uint64_t g_disp_exit_group;
 /* Snapshot of vclgo_passthrough() taken at ctor time. In passthrough
  * mode the dispatcher is a no-op — we still install patches so the
  * observability counters accumulate, but every dispatch decision
- * decays to a raw kernel syscall.
- *
- * This mirrors the retired seccomp preload, which bailed out of
- * `start_interceptor` when passthrough was true. We're stricter: we
- * intercept, but do not route to vclgo_XXX APIs (which would return
- * -ENOSYS via active_gate).
+ * decays to a raw kernel syscall. We do not route to vclgo_XXX APIs in
+ * this state because active_gate would reject them with ENOSYS.
  */
 static gboolean g_passthrough;
 
@@ -177,8 +164,7 @@ should_route_socket (int domain, int type, int protocol)
     return 0;
 }
 
-/* Bounded, no allocation. Matches the retired seccomp preload's
- * dispatch_writev semantics. */
+/* Bounded, allocation-free writev translation for VCL-owned fds. */
 static ssize_t
 dispatch_writev (int fd, const struct iovec *iov, int iov_count)
 {
@@ -203,8 +189,7 @@ dispatch_writev (int fd, const struct iovec *iov, int iov_count)
     return total;
 }
 
-/* Bounded, no allocation. Matches the retired seccomp preload's
- * dispatch_readv semantics. */
+/* Bounded, allocation-free readv translation for VCL-owned fds. */
 static ssize_t
 dispatch_readv (int fd, const struct iovec *iov, int iov_count)
 {
@@ -226,9 +211,9 @@ dispatch_readv (int fd, const struct iovec *iov, int iov_count)
 
 /* THE dispatcher. Called from the asm shim (see section 2). All
  * arguments arrive by SysV C-ABI: rdi=nr, rsi=a0, rdx=a1, rcx=a2,
- * r8=a3, r9=a4. a5 is not passed (see section 2). Returns __int128
- * so the kernel's rdx side-value survives back to Syscall6's result-
- * translation block. */
+ * r8=a3, r9=a4, with a5 in the first stack-argument slot. Returns
+ * __int128 so the kernel's rdx side-value survives back to Syscall6's
+ * result-translation block. */
 /* Debug trace switch: `VCLGO_FASTPATH_TRACE=1` prints every dispatch to
  * fd 2. Very loud — only enable when hunting a specific bug. */
 static gboolean g_trace;
@@ -255,8 +240,8 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
 {
     atomic_fetch_add_explicit (&g_disp_total, 1, memory_order_relaxed);
 
-    /* Special: process shutdown. Same rationale as the retired seccomp
-     * preload — the dispatcher-side teardown must complete before we let
+    /* Special: process shutdown. Dispatcher-side teardown must complete
+     * before we let
      * the kernel run do_exit on this thread, otherwise concurrent VCL
      * owner threads would race against exit_group and vppcom_app_destroy.
      */
@@ -427,8 +412,8 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
     }
     case __NR_fcntl: {
         int cmd = (int) a1;
-        /* dup-family via fcntl breaks our exact-registry ownership
-         * model; refuse the same way the retired seccomp preload did. */
+        /* dup-family via fcntl breaks exact-registry ownership, so reject it
+         * explicitly. */
         if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
             *vclgo_errno_addr () = EOPNOTSUPP;
             rv = -1;
@@ -449,10 +434,9 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
         rv = -1;
         break;
     default: {
-        /* Any other syscall that happens to touch an owned fd — we do
-         * not know how to translate it, so fall back to a raw kernel
-         * syscall against the surrogate fd. Same as the retired seccomp
-         * preload's default: continued=1 (kernel-passthrough) behavior. */
+        /* Any other syscall that happens to touch an owned fd is not
+         * translated and currently falls through to the kernel against the
+         * surrogate fd. This behavior is a documented production gap. */
         long lo, hi;
         raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
         return pack128 (lo, hi);
@@ -663,15 +647,17 @@ vclgo_fastpath_stats (uint64_t *total, uint64_t *owned, uint64_t *raw,
  *
  * Called from both:
  *   - M2 per-site trampolines (via `jmp shim`, after `mov $NR, %eax`)
- *   - The Syscall6 wrapper trampoline (via `call shim`, after the
- *     4-mov Go-internal-ABI -> SysV-syscall-ABI conversion)
+ *   - The Syscall6 wrapper trampoline (via `push post; jmp shim`, after
+ *     the 4-mov Go-internal-ABI -> Linux-syscall-ABI conversion)
  *
- * On entry:  rax=NR, rdi/rsi/rdx/r10/r8/r9 = SysV syscall args a0..a5
+ * On entry:  rax=NR, rdi/rsi/rdx/r10/r8/r9 = Linux syscall args a0..a5
  * On return: rax = kernel-style result (low 64 of dispatcher's int128)
  *            rdx = kernel-style result2 (high 64 of dispatcher's int128)
- *            All other regs preserved by SysV C ABI.
+ *            SysV callee-saved regs are preserved; caller-saved regs may
+ *            be clobbered.
  *
- * For M2 sites: caller ignores rdx (verified against runtime.futex.abi0).
+ * For immediate sites: caller ignores rdx (verified against
+ * runtime.futex.abi0).
  * For Syscall6: tramp jumps to entry+14 which uses both rax and rdx.
  * ============================================================
  */
@@ -682,7 +668,7 @@ vclgo_fastpath_stats (uint64_t *total, uint64_t *owned, uint64_t *raw,
 /* Shim / trampoline slot budgets, all upper bounds. */
 #define VCLGO_SHIM_MAXLEN    128u
 #define VCLGO_M2_TRAMP_SIZE  16u   /* mov $NR, %eax; jmp shim   */
-#define VCLGO_S6_TRAMP_SIZE  64u   /* 4 movs; call shim; movabs; jmp *r11 */
+#define VCLGO_S6_TRAMP_SIZE  64u   /* 4 movs; movabs post; push; jmp shim */
 #define VCLGO_MAX_M2_SITES   256u
 
 /* Emit the shared shim starting at `dst`. Returns bytes written. */
@@ -712,7 +698,7 @@ emit_shim (uint8_t *dst, void *dispatch_addr)
     dst[o++] = 0x4C; dst[o++] = 0x89; dst[o++] = 0x54; dst[o++] = 0x24; dst[o++] = 0x18;
     /* mov %r8,  32(%rsp) [a4] */
     dst[o++] = 0x4C; dst[o++] = 0x89; dst[o++] = 0x44; dst[o++] = 0x24; dst[o++] = 0x20;
-    /* mov %r9,  40(%rsp) [a5, preserved but not passed to C]   */
+    /* mov %r9,  40(%rsp) [a5, later passed as C stack arg]      */
     dst[o++] = 0x4C; dst[o++] = 0x89; dst[o++] = 0x4C; dst[o++] = 0x24; dst[o++] = 0x28;
 
     /* Marshal C ABI args for vclgo_dispatch(nr, a0..a5). NR was in %rax
@@ -744,8 +730,9 @@ emit_shim (uint8_t *dst, void *dispatch_addr)
      * accordingly. */
     dst[o++] = 0xFF; dst[o++] = 0x74; dst[o++] = 0x24; dst[o++] = 0x28;
     /* Before the push rsp was 16-aligned (we did sub $64). After the
-     * push rsp is 8-mod-16. CALL will push 8 more, giving the callee
-     * 0-mod-16 which is what SysV wants. */
+     * push rsp is 8-mod-16. CALL gives the naked dispatcher a
+     * 0-mod-16 entry; its hand-written prologue realigns before calling
+     * ordinary C. */
 
     /* movabs $dispatch, %r11  (this .so is loaded far from .text) */
     dst[o++] = 0x49; dst[o++] = 0xBB;
@@ -770,9 +757,9 @@ emit_shim (uint8_t *dst, void *dispatch_addr)
 }
 
 /* ============================================================
- * Section 3: M2 site discovery + patching
+ * Section 3: immediate-number site discovery + patching
  *
- * Straight copy of the (removed) gum_full milestone's M2 half. Finds every
+ * Finds every
  *   `mov $NR, %eax|rax; SYSCALL` site inside the main executable's
  * .text and rewrites it as
  *   `CALL rel32 -> per_site_tramp; NOPs`.
@@ -884,9 +871,9 @@ patch_m2_site (m2_site_t *s, const uint8_t *tramp)
 }
 
 /* ============================================================
- * Section 4: M2.5 wrapper detour (identity for 2 of 3, dispatch for Syscall6)
+ * Section 4: wrapper detours (identity for 2 of 3, dispatch for Syscall6)
  *
- * `Syscall6` gets the dispatch path (NEW for M3b).
+ * `Syscall6` gets the dispatch path.
  * `rawSyscallNoError` and `rawVforkSyscall` stay identity-passthrough
  * because they aren't on the network path.
  * ============================================================
@@ -978,8 +965,7 @@ scan_syscall_offset (const uint8_t *entry, size_t max_scan)
 
 /* Trampoline for identity wrappers (rawSyscallNoError, rawVforkSyscall):
  *   [copied prologue] + JMP rel32 to (entry + prologue_len)
- * Byte-for-byte semantic no-op. Same as the removed gum_full milestone
- * (M2.5). */
+ * Byte-for-byte semantic no-op. */
 static void
 emit_identity_wrapper_tramp (uint8_t *tramp, const wrapper_t *w)
 {
@@ -994,15 +980,15 @@ emit_identity_wrapper_tramp (uint8_t *tramp, const wrapper_t *w)
     memcpy (jmp_at + 1, &rel32, 4);
 }
 
-/* Trampoline for Syscall6 (M3b).
+/* Trampoline for Syscall6.
  *
  * Layout:
  *
- *   mov %rsi, %r10       3    ; Go-internal a3 -> SysV syscall a3
- *   mov %rdi, %rdx       3    ; Go-internal a2 -> SysV syscall a2
- *   mov %rcx, %rsi       3    ; Go-internal a1 -> SysV syscall a1
- *   mov %rbx, %rdi       3    ; Go-internal a0 -> SysV syscall a0
- *   ; now: rax=NR, rdi/rsi/rdx/r10/r8/r9 = SysV syscall args
+ *   mov %rsi, %r10       3    ; Go-internal a3 -> Linux syscall a3
+ *   mov %rdi, %rdx       3    ; Go-internal a2 -> Linux syscall a2
+ *   mov %rcx, %rsi       3    ; Go-internal a1 -> Linux syscall a1
+ *   mov %rbx, %rdi       3    ; Go-internal a0 -> Linux syscall a0
+ *   ; now: rax=NR, rdi/rsi/rdx/r10/r8/r9 = Linux syscall args
  *   movabs $post, %r11  10    ; post = entry + syscall_off
  *   push  %r11           2    ; masquerade `post` as our "return address"
  *   jmp   shim           5    ; NOT a call — dispatch will `ret` to post
@@ -1014,8 +1000,8 @@ emit_identity_wrapper_tramp (uint8_t *tramp, const wrapper_t *w)
  * dispatcher runs. If Go's runtime walks that stack during signal
  * delivery — SIGURG preemption, SIGPROF profiling, or a nested SIGSEGV
  * from within a VLS/VPP callback — it does not know how to decode a PC
- * inside our anonymous mapping and aborts with "unexpected return pc",
- * exactly like it did with Frida's `Interceptor.attach`. Long-blocking
+ * inside our anonymous mapping and aborts with an unwinder failure such as
+ * "unexpected return pc". Long-blocking
  * VLS-owned syscalls (connect, read, write on a routed socket) make
  * that window arbitrarily wide, so the crash was reliably reproducible.
  *
@@ -1090,12 +1076,11 @@ __attribute__ ((constructor))
 static void
 vclgo_gum_ctor (void)
 {
-    /* Escape hatch for debugging. (Was also honored by the retired
-     * seccomp preload.) */
+    /* Escape hatch for debugging. */
     if (getenv ("VCLGO_DISABLE"))
         return;
 
-    /* G-D2: DISCOVER FIRST, INITIALIZE ONLY IF WE'LL PATCH.
+    /* DISCOVER FIRST, INITIALIZE ONLY IF WE WILL PATCH.
      *
      * The dispatcher's vclgo_init() registers this process as a VCL
      * application with VPP and spins up an owner-worker pthread pool.
@@ -1128,7 +1113,7 @@ vclgo_gum_ctor (void)
     }
     fprintf (stderr, "[vclgo/gum] main module: %s\n", gum_module_get_name (m));
 
-    /* --- M2 site discovery --- */
+    /* --- immediate-number site discovery --- */
     m2_state_t st = { 0 };
     gum_module_enumerate_sections (m, on_text_section, &st);
     if (!st.text_found) {
@@ -1304,8 +1289,7 @@ static void
 vclgo_gum_dtor (void)
 {
     if (!g_did_patch) return;
-    /* Same ordering rationale as the retired seccomp preload: teardown
-     * VCL after all dispatch traffic has quiesced. The exit_group
+    /* Teardown VCL after all dispatch traffic has quiesced. The exit_group
      * interception in vclgo_dispatch already covers the normal exit
      * path; this dtor is a belt-and-braces net for abnormal exits
      * (dlclose, atexit ordering issues, etc.). */

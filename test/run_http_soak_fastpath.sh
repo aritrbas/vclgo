@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_http_soak_fastpath.sh — HTTP soak gate for the fastpath preload
-# (G-D6a / G-D6b). Uses LD_PRELOAD with libvclgo_gum_vcl.so so the entire
+# preload. Uses LD_PRELOAD with libvclgo_gum_vcl.so so the entire
 # HTTP path — Go net/http, VCL, VPP session layer — runs against the
 # in-process syscall patcher at both endpoints.
 #
@@ -17,7 +17,7 @@
 # Defaults produce the release-gate scenario: 5 rounds * (100 workers *
 # 100 reqs) = 50 000 requests. Override via ROUNDS, CONC, REQS.
 #
-# Both keepalive-on (G-D6a) and keepalive-off (G-D6b) modes are supported.
+# Both keepalive-on and keepalive-off modes are supported.
 # Pass HTTP_CLIENT_EXTRA='-no-keepalive' from the caller to exercise the
 # per-connection path; the default (no flag) uses net/http's default
 # keepalive Transport.
@@ -57,7 +57,7 @@ for config in "$SERVER_VCL_CONFIG" "$CLIENT_VCL_CONFIG"; do
     fi
 done
 
-# G-D1: export the variables run_fastpath reads so the setsid subshell
+# Export the variables run_fastpath reads so the setsid subshell
 # sees them. Same rationale as run_smoke_fastpath.sh.
 export VCLGO_GUM_LIB
 [ -n "${VCLGO_LOG:-}"           ] && export VCLGO_LOG

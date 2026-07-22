@@ -1,7 +1,5 @@
 #!/bin/bash
-# start_vpp.sh — start VPP for vclgo integration testing. Nearly identical
-# to vclnet/test/start_vpp.sh but scoped to this repo so vclgo can be tested
-# without a vclnet checkout.
+# start_vpp.sh — start one VPP instance for local vclgo integration tests.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

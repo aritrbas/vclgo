@@ -1,119 +1,89 @@
-# vclgo project plan
+# vclgo production-readiness plan
 
 Last updated: 2026-07-22.
 
 ## Goal
 
-Run dynamically linked, unmodified Go applications through VPP VCL using
-`LD_PRELOAD`, while preserving Go netpoll/deadlines and supporting hundreds
-of goroutines, multiple VCL owner pthreads, and multi-worker VPP.
+Run dynamically linked, unmodified Linux/amd64 Go applications through VPP
+VCL with:
 
-## Approach map
+- direct `LD_PRELOAD=libvclgo_gum_vcl.so`;
+- native Frida-Gum patching of Go raw-syscall paths;
+- correct Go scheduling, netpoll, deadlines, stacks, and error results;
+- multiple permanent VCL owner pthreads and multi-worker VPP;
+- sustained workloads with 100 or more goroutines.
 
-| # | Name | Decision |
+Approach #4 is the only implementation built from this repository. There is
+no runtime backend or phase selector.
+
+## Completed implementation
+
+- Immediate-number `SYSCALL` sites and the three generic Go syscall wrappers
+  are discovered in the main executable and patched in memory.
+- The shim converts Linux syscall registers to SysV arguments, switches to a
+  512 KiB pthread-local native stack, and returns through valid Go `.text`.
+- The native dispatcher routes supported INET TCP/UDP calls to permanent VLS
+  owner pthreads and leaves unrelated kernel descriptors on the raw path.
+- Real nonblocking socket-pair surrogates integrate VCL readiness with Go
+  epoll/netpoll and Go-managed deadlines.
+- Sessions have exact registry ownership, reference-counted lifetime, and one
+  immutable VCL owner; accepted children inherit their listener owner.
+- Connected and unconnected UDP, TCP control/data, HTTP/1, close, and terminal
+  VCL application detach are implemented at the documented surface.
+- The July 22 validation matrix passed cut-through TCP/deadlines and routed
+  UDP/HTTP on two multi-worker VPP instances. Exact evidence is in
+  [status.md](status.md).
+
+## Ordered gates
+
+The first two items are correctness blockers. Scale or protocol results do
+not compensate for them.
+
+| Priority | Gate | Required completion evidence |
 |---:|---|---|
-| 1 | vclnet/source integration | Use when application source can change (separate repo) |
-| 2 | Frida Interceptor/JavaScript | Retired; code deleted (docs retained) |
-| 3 | seccomp user notification | Retired; code deleted (docs retained) |
-| 4 | Frida-Gum native fastpath | **Only shipping backend** |
-
-The old Phase 1/2/3 labels are chronology, not configurable modes. Approach
-number 4 is selected with `LD_PRELOAD=.../libvclgo_gum_vcl.so`.
-
-## Completed for Approach #4
-
-- Native Frida-Gum/Capstone discovery and in-memory patching of Go syscall
-  sites and generic wrappers.
-- Explicit Linux syscall ABI to SysV conversion and kernel-style result/error
-  conversion back to Go's original wrapper.
-- Per-pthread 512 KiB dispatcher stack; no VLS/VCL frames on a goroutine
-  stack.
-- Shared dispatcher with real socket-pair surrogate fds and permanent VLS
-  owner pthreads.
-- TCP control/data, epoll readiness, deadlines, options, shutdown, and close.
-- UDP connected/unconnected data paths, ephemeral bind allocation, connected
-  peer caching, and name/error semantics.
-- Terminal detach-only teardown that avoids a per-session disconnect storm.
-- Non-Go `LD_PRELOAD` guard and server/client preload propagation.
-- Cut-through TCP concurrency/deadline validation.
-- Routed two-VPP UDP and HTTP-over-TCP validation.
-
-Exact results are in [status.md](status.md); topology and test commands are in
-[test_topology.md](test_topology.md).
-
-## Approach D fastpath open gates
-
-The original gate identifiers are retained so older design links remain
-meaningful.
-
-| Gate | State | Evidence or remaining work |
-|---|---|---|
-| G-D1 preload reaches both endpoints | Closed | Harness checks `passthrough=0` |
-| G-D2 skip VCL init for non-Go helpers | Closed | Helpers such as `timeout` no longer double-register |
-| G-D3 two-process VCL bring-up | Closed | TCP echo and routed HTTP endpoints initialize VCL |
-| G-D4 128-way payload integrity | Closed for cut-through | 16 MiB each way, zero errors |
-| G-D5 100 simultaneous deadlines | Closed for cut-through | 250 ms blocked-read test passed |
-| G-D6 routed HTTP integrity/failure gate | Closed at tested scale | Keepalive on/off: 50,000 requests each, plus 128-way runs |
-| G-D7 target container `mprotect` policy | Open | Test intended image/LSM/seccomp profile |
-| G-D8 launcher `--backend=fastpath` | Open | Direct `LD_PRELOAD` is currently authoritative |
-| G-D9 Go-version matrix | Open | Exercise supported Go releases |
-| G-D10 unknown-prologue degradation | Closed in code; matrix open | Unrecognized wrappers are logged/skipped; verify across Go versions |
-| G-D11 operational counters | Open | Export/dump fastpath and owner statistics |
-| G-D12 async-preemption soak | Open | Multi-hour `SIGPROF`/high-`GOMAXPROCS` run |
-| G-D13 exact `accept4` flag matrix | Open | Verify every flag combination |
-| G-D14 fault injection | Open | VPP restart, app-socket loss, resource pressure |
-| G-D15 CI gates | Open | Automate build, CT, and routed tests |
-| G-D16 UDP VCL path | Closed at tested scale | Connected and unconnected 128-way routed runs passed |
-| G-D17 heavy local cut-through churn | External/open | Reproduce/fix in tested VPP branch |
-| G-D18 listener-owner sharding | Open | Add multiple listeners/`SO_REUSEPORT` if server scaling needs it |
-| G-D19 higher protocols | Open | TLS, HTTP/2, and gRPC soaks |
-| G-D20 endurance/scale | Open | Multi-hour mixed workload at 100–1,000 goroutines |
-
-## Next work, in order
-
-1. Preserve the current routed UDP and HTTP tests as repeatable scripts or CI
-   jobs that also create the two-VPP topology.
-2. Add a routed raw-TCP echo gate so TCP payload testing does not rely only on
-   HTTP and cut-through echo.
-3. Run TLS/HTTP2/gRPC and connection-error/half-close/reset matrices.
-4. Run the Go-version and target-container compatibility matrices.
-5. Add long-duration preemption, churn, and 1,000-goroutine soaks.
-6. Decide whether the workload needs multiple listeners to distribute
-   accepted sessions over several VCL owners.
-7. Isolate the same-VPP cut-through crash in VPP; do not hide it by calling a
-   routed test a cut-through test or vice versa.
+| P0 | Forward syscall argument 6 on raw fallback | Replace the five-argument raw helper; test a known six-argument kernel syscall through both passthrough and non-owned-fd paths |
+| P0 | Make patch installation atomic | Resolve and preflight every required site first; either install the complete set or restore all modified bytes, tear VCL down, and refuse startup |
+| P0 | Add executable tests | Unit tests for ABI/result conversion, classification, registry/refcounts, address conversion, unsupported calls, and injected startup failures |
+| P0 | Prove Go-buffer lifetime | Prove that borrowed buffers remain reachable and stationary while an owner pthread uses them, or implement an explicit pin/copy contract; validate with forced GC and async preemption |
+| P0 | Prove direct-site register liveness | For every recognized immediate syscall site, prove the continuation does not consume SysV caller-saved registers or preserve the required register set explicitly |
+| P1 | Routed raw TCP | Repeatable two-VPP echo payload, deadline, reset, refused-connect, half-close, and shutdown matrix |
+| P1 | Owned-fd syscall policy | Translate or explicitly reject every relevant operation; never let operations such as `sendfile`, `splice`, or unknown `ioctl` act on the surrogate as if it carried payload |
+| P1 | Constructor compatibility | Supported Go-version matrix, PIE/non-PIE and stripped binaries, wrapper-layout checks, rollback tests, and explicit unsupported-binary behavior |
+| P1 | Runtime safety soak | Multi-hour asynchronous-preemption/profiling run at high `GOMAXPROCS` and 100–1,000 goroutines with core/log scanning |
+| P1 | Protocol matrix | TLS, HTTP/2, gRPC, IPv6, large bodies, cancellation, slow peers, and error propagation |
+| P1 | Lifecycle/fault matrix | VPP restart, application-socket loss, resource exhaustion, signal termination, active connection shutdown, and startup failures |
+| P1 | Deployment matrix | Exact production VPP/VCL revision, container image, hard `RLIMIT_NOFILE`, executable-memory policy, LSM, capabilities, and shared-memory permissions |
+| P1 | Cut-through defect | Isolate and fix the same-VPP heavy HTTP churn crash in the tested VPP branch, or explicitly exclude that topology |
+| P2 | Listener scaling | Measure the single-listener owner hot spot; add and test listener sharding/reuse-port if required |
+| P2 | Observability | Export patch, dispatch, queue-depth, wake, error, owner/session, and teardown counters with actionable alerts |
+| P2 | Continuous regression | Provision both topologies from clean state, assert VCL routing at both endpoints, collect VPP state, and fail on residue or crash signatures |
 
 ## Promotion criteria
 
-Approach #4 can move from engineering prototype to an internal beta when:
+An internal beta requires all P0 gates plus routed TCP/UDP/HTTP reproducibility
+on the target Go and VPP versions. Production additionally requires every P1
+gate relevant to the deployed topology and workload, a sustained-load
+capacity result with safety margin, monitoring, rollback, and automated
+regression coverage.
 
-- routed TCP, UDP, HTTP, and higher-protocol gates are repeatable from a clean
-  topology;
-- the intended Go versions and container profile pass;
-- no Go unwinder, register, stack, heap, or VCL TLS signature appears in an
-  extended preemption/soak run;
-- all VPP applications/sessions drain after normal shutdown;
-- owner saturation and listener concentration are acceptable for the target
-  workload;
-- unsupported socket operations are either explicitly rejected or covered by
-  tests with defined semantics.
+The following are not acceptable substitutes:
 
-Production readiness additionally requires operational monitoring, automated
-regression coverage, fault injection, and acceptance on the exact deployed
-VPP revision.
+- a same-VPP local-scope pass presented as routed TCP or UDP evidence;
+- `go test ./...` reported as unit coverage while packages say
+  `[no test files]`;
+- startup that logs a skipped required patch and continues;
+- successful TCP/HTTP tests used to infer six-argument raw-syscall safety;
+- a successful short soak used as a substitute for a Go-pointer lifetime proof;
+- a configured number of VCL owners used to infer even session or VPP-worker
+  distribution.
 
-## Non-goals
+## Scope boundaries
 
-- Supporting static or privileged executables via `LD_PRELOAD`.
-- Claiming full Linux socket ABI compatibility.
-- Mapping one goroutine to one VCL or VPP worker.
-- Treating same-VPP local cut-through as routed TCP/UDP evidence.
-- Reintroducing Frida Interceptor/JavaScript callbacks into Go runtime frames.
+- Static and privileged executables are outside the `LD_PRELOAD` model.
+- Full Linux socket ABI compatibility is not claimed.
+- A goroutine is never mapped one-to-one to a VCL owner or VPP worker.
+- Active teardown and reinitialization inside one process are unsupported.
 
-## Decision summary
-
-Approach #4 is the preferred technical direction because it keeps the
-unmodified-binary deployment model, removes seccomp's per-call kernel
-round-trip, preserves the permanent-owner correctness model, and has passed
-the current routed UDP/HTTP tests. It remains an engineering prototype until
-the open compatibility and endurance gates above are closed.
+See [architecture.md](architecture.md),
+[text_patching.md](text_patching.md), and
+[test_topology.md](test_topology.md) for the design and evidence model.

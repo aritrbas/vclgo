@@ -1,8 +1,9 @@
 # Historical Frida phase: failure and retirement record
 
-Status: historical Approach #2. The current focus is Approach #4, the native
-Frida-Gum fastpath. Approach #3 is the separate seccomp backend.
-Do not use this document as launch instructions.
+> **Archived Approach #2 design record.** The implementation and paths
+> described here are no longer in the tree. Do not use this document as
+> launch instructions. See [the current architecture](../../architecture.md)
+> and [current status](../../status.md) for the shipping Frida-Gum backend.
 
 The Frida phase was valuable because it proved that an unmodified Go process
 could be redirected to VCL. It also demonstrated why live Go function
@@ -60,8 +61,8 @@ resolution in the native backend.
 The theoretical sections below describe *why* Frida cannot work with Go. The
 sections here record *what actually broke* during our live bring-up, so a
 future reader can distinguish "we didn't try hard enough" from "the
-mechanism is unfit". Each entry corresponds to a defect ID in
-[analysis_bugs.md](analysis_bugs.md).
+mechanism is unfit." Historical defect IDs are retained in the headings
+below; they are not part of the current risk ledger.
 
 ### S1-9 — Cross-thread `__thread errno` cache bug
 
@@ -403,7 +404,7 @@ corruption.
 
 | Frida-era issue | Native mechanism |
 |---|---|
-| Function replacement | Native raw-syscall-site interception (Approach #4) or kernel stop (Approach #3) |
+| Function replacement | Native raw-syscall-site interception in Approach #4 |
 | Live register context writes | Explicit ABI shim/original Go wrapper |
 | Foreign frames on G stack | Dispatcher stack plus owner pthread VLS stack |
 | Frida JS heap scratch | No JavaScript/agent heap |
@@ -419,10 +420,10 @@ corruption.
 The Frida Interceptor.attach backend (Approach #2) has been removed from the
 codebase. The `VCLGO_BACKEND=frida` selector, the `vclgo attach <pid>`
 subcommand, the `frida/interceptor.js` agent, and the `dispatcher/legacy/`
-Frida-era dispatcher are all deleted. Only the native LD_PRELOAD path
-(Approach #3 seccomp / Approach #4 fastpath) is buildable. This document is
+Frida-era dispatcher are all deleted. Only the Approach #4 native Frida-Gum
+LD_PRELOAD path is buildable. This document is
 retained as the historical record of why Approach #2 was pursued and why it
 was retired; see also [why_frida_dropped.md](why_frida_dropped.md).
 
-Current Approach #4 status and open risks are documented in [status.md](status.md) and
-[analysis_bugs.md](analysis_bugs.md).
+Current status and open risks are documented in
+[status.md](../../status.md) and [analysis_bugs.md](../../analysis_bugs.md).

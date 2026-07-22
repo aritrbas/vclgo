@@ -1,63 +1,52 @@
 # vclgo documentation
 
-Last synchronized with the repository: 2026-07-22.
+Last synchronized with code and tests: 2026-07-22.
 
-vclgo ships a single backend: **Approach #4 / Approach D**, the Frida-Gum
-native fastpath in `preload/fastpath/`. Approach numbers are:
+The root of this directory documents the only implementation in the current
+tree: **Approach #4, the native Frida-Gum fastpath**.
 
-| Number | Letter | Design | Status |
-|---:|:---:|---|---|
-| 1 | A | vclnet source-level integration | Viable when source changes are allowed (separate repo) |
-| 2 | B | Frida `Interceptor.attach` + JavaScript | Retired; code deleted (docs retained) |
-| 3 | C | seccomp user notification preload | Retired; code deleted (docs retained) |
-| 4 | D | Frida-Gum native syscall-site fastpath | **Only shipping backend** |
-
-Approach #4 uses Frida-Gum as a statically linked C patching library. It does
-not use the Frida agent, JavaScript, `Interceptor.attach`, seccomp, or eBPF.
-
-## Read this first
+## Reading order
 
 | Document | Purpose | Authority |
 |---|---|---|
-| [Current status](status.md) | Exact tested evidence, limitations, and readiness statement | Current |
-| [Test topology](test_topology.md) | Which tests are routed and which are VPP cut-through | Current |
-| [Fastpath architecture](architecture_fastpath.md) | Byte-level syscall interception and ABI design | Current |
-| [Fastpath diagram atlas](architecture_diagrams_fastpath.md) | Register, stack, memory, fd, owner, and lifecycle diagrams | Current |
-| [Goroutine/pthread model](model_goroutine_pthread.md) | Mapping among goroutines, Go Ms, VCL owners, and VPP workers | Current |
-| [Plan](plan.md) | Completed work and remaining gates | Current |
-| [Adoption guide](adoption_guide.md) | Build, configure, validate, and roll back | Current |
-| [Approach comparison](comparison_approaches.md) | Why Approach #4 was selected | Current |
-| [Bug and risk ledger](analysis_bugs.md) | Fixed Approach #4 defects and remaining risks | Current |
-| [Concurrency analysis](analysis_goroutine_pthread.md) | Detailed scheduling and ownership reasoning | Current |
-| [Architecture decisions](analysis_architecture.md) | Current Approach #4 decisions and alternatives | Current |
+| [Current status](status.md) | Verified evidence, unsupported behavior, and production gates | Readiness source of truth |
+| [Test topology](test_topology.md) | What each cut-through or routed test actually proves | Test-claim source of truth |
+| [Architecture](architecture.md) | End-to-end patcher, dispatcher, VCL/VLS, and lifecycle design | Design source of truth |
+| [Text patching](text_patching.md) | Concrete Go `.text` bytes, thunks, trampolines, ABI conversion, and stack layouts | Machine-code source of truth |
+| [Architecture diagrams](architecture_diagrams.md) | Process, memory, register, stack, readiness, and lifecycle diagrams | Visual design atlas |
+| [Goroutine/pthread model](model_goroutine_pthread.md) | Mapping among goroutines, Go Ms, owner pthreads, VLS, and VPP workers | Ownership source of truth |
+| [Concurrency analysis](analysis_goroutine_pthread.md) | Scheduling, blocking, close races, and scaling analysis | Detailed concurrency rationale |
+| [Architecture decisions](analysis_architecture.md) | Accepted decisions and consequences | Decision record |
+| [Bug and risk ledger](analysis_bugs.md) | Fixed defects, open risks, and stop conditions | Risk source of truth |
+| [Adoption guide](adoption_guide.md) | Build, configure, validate, deploy, and roll back | Operator guide |
+| [Plan](plan.md) | Ordered work required before production promotion | Work queue |
 
-## Reference and historical documents
+## Documentation rules
 
-| Document | Scope |
-|---|---|
-| [Seccomp architecture](architecture.md) | Approach #3 only; code deleted from tree, kept as design reference |
-| [Seccomp diagrams](architecture_diagrams.md) | Approach #3 only; code deleted from tree, kept as design reference |
-| [Why Frida Interceptor was dropped](why_frida_dropped.md) | Explains why Approach #2 failed and why that does not condemn Frida-Gum |
-| [Phase-1 retirement audit](phase1_frida.md) | Historical defect record for Approach #2 |
+- A test claim includes topology, load, VCL owner count, VPP worker count,
+  and result.
+- Same-VPP local scope is called **VCL cut-through**. It is never presented
+  as TCP/UDP packet-dataplane validation.
+- Two-VPP global scope over memif is called **routed acceptance**.
+- Implemented behavior is separated from tested behavior. For example, IPv6
+  paths exist, but the recorded routed acceptance matrix is IPv4.
+- Known production blockers remain visible in
+  [status.md](status.md) and [analysis_bugs.md](analysis_bugs.md).
+- Machine-code examples name the Go version and binary used to obtain them.
 
-## Approach #4 in one paragraph
+## Current design in one paragraph
 
-`libvclgo_gum_vcl.so` is loaded by `LD_PRELOAD`. Its constructor uses
-Frida-Gum/Capstone to find the Go executable's raw `SYSCALL` sites and
-splices them to native trampolines. A shared shim converts the Linux syscall
-register ABI to SysV, switches off the goroutine stack, and calls the
-POSIX-shaped dispatcher. The dispatcher assigns VCL sessions to permanent
-owner pthreads and represents them to Go with real socket-pair fds, preserving
-Go netpoll and deadline behavior.
+`libvclgo_gum_vcl.so` is loaded with `LD_PRELOAD`. Its constructor uses
+Frida-Gum and Capstone to discover Go raw-syscall paths and patch the main
+executable's in-memory `.text`. A native shim preserves Linux syscall
+semantics, switches from the goroutine stack to a dedicated dispatcher stack,
+and calls a POSIX-shaped API. Each VLS handle remains permanently attached to
+one registered owner pthread. A real nonblocking Unix socketpair represents
+the VCL session to Go, allowing the ordinary runtime epoll/netpoll and
+deadline machinery to remain authoritative.
 
-## Documentation policy
+## Historical archive
 
-- [status.md](status.md) is authoritative for what has actually passed.
-- [test_topology.md](test_topology.md) is authoritative for what a test pass
-  proves. A local-scope same-VPP result must be called cut-through, not TCP or
-  UDP dataplane validation.
-- Historical failures must identify Approach #2 explicitly. “Frida failed”
-  without distinguishing Interceptor from native Frida-Gum is inaccurate.
-- Phase names describe project history; runtime selection is by preload
-  library, not by a phase switch.
-- Test claims state topology, load, result, and remaining gaps.
+Designs that are not present in the current codebase are isolated under
+[deprecated/](deprecated/). They are retained only for engineering history
+and are not part of the build, runtime, or current test matrix.

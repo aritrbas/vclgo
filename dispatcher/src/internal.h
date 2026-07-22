@@ -9,10 +9,6 @@
  * helpers, socket metadata struct, epoll event aliases, and the
  * initialization state machine. Backend-specific interfaces live in
  * native_internal.h.
- *
- * (Historical note: this file used to also be shared with a retired
- * Frida-Interceptor-era dispatcher archived under dispatcher/legacy/;
- * that tree has been deleted. See docs/why_frida_dropped.md.)
  */
 #ifndef VCLGO_INTERNAL_H
 #define VCLGO_INTERNAL_H
@@ -58,13 +54,8 @@ extern int vclgo_log_level;
 
 /* ---------- errno helpers ------------------------------------------------ */
 
-/* Set libc errno and return -1, matching POSIX conventions.
- *
- * We write to libc's own `errno` (thread-local via `__errno_location()`)
- * rather than a private TLS slot so every consumer reads it the ordinary
- * way. A prior design exposed a private slot via `vclgo_errno_addr()` and
- * the Frida interceptor cached that pointer once on its init thread — see
- * analysis_bugs.md S1-9 for how that misreported every VCL error as EIO. */
+/* Set libc errno and return -1, matching POSIX conventions. libc owns the
+ * thread-local slot, so each owner pthread reports its own operation error. */
 static inline int vclgo_set_errno(int e) {
     errno = e;
     return -1;
@@ -98,9 +89,7 @@ typedef struct {
 
 /* ---------- Event mask aliases ----------------------------------------- */
 
-/* Bitmask kept in the wire format vls_epoll_ctl expects. Used by both the
- * native owner pool (session_update_interest) and, historically, by the
- * archived Frida poller. */
+/* Bitmask kept in the wire format vls_epoll_ctl expects. */
 #define VCLGO_EV_READ  EPOLLIN
 #define VCLGO_EV_WRITE EPOLLOUT
 #define VCLGO_EV_ERR   (EPOLLERR | EPOLLHUP | EPOLLRDHUP)
