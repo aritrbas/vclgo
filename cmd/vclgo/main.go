@@ -1,9 +1,9 @@
 // Command vclgo launches dynamically linked Go binaries through the native
-// LD_PRELOAD/seccomp VCL backend. The legacy Frida backend is retained only
-// for explicit diagnostics and attach mode.
+// LD_PRELOAD/seccomp (Approach #3) or LD_PRELOAD/frida-gum-fastpath
+// (Approach #4) backend. The retired Frida Interceptor.attach + JavaScript
+// backend (Approach #2) has been removed; see docs/why_frida_dropped.md.
 //
 //	vclgo run ./my-go-app [args...]
-//	vclgo attach <pid>
 //	vclgo validate ./my-go-app
 package main
 
@@ -18,7 +18,6 @@ const usage = `vclgo — transparent VPP/VCL launcher for unmodified Go binaries
 Usage:
   vclgo run      <binary> [args...]      Run with native VCL interception.
   vclgo validate <binary>                Check native preload compatibility.
-  vclgo attach   <pid>                   Legacy Frida diagnostic attach.
 
 Environment:
   VCL_CONFIG       Path to vcl.conf; unset selects kernel passthrough.
@@ -26,7 +25,6 @@ Environment:
   VCLGO_NOTIFIERS  Seccomp notification threads (auto by default).
   VCLGO_LOG        0=errors, 1=lifecycle (default), 2=call diagnostics.
   VCLGO_PRELOAD    Override path to libvclgo_preload.so.
-  VCLGO_BACKEND    native (default) or frida (legacy diagnostic mode).
 
 Native requirements:
   A dynamically linked linux/amd64 Go executable, seccomp user notification,
@@ -44,10 +42,6 @@ func main() {
 	switch sub {
 	case "run":
 		if err := cmdRun(args); err != nil {
-			fatal(err)
-		}
-	case "attach":
-		if err := cmdAttach(args); err != nil {
 			fatal(err)
 		}
 	case "validate":
@@ -68,8 +62,8 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-// launcherRoot resolves the directory that contains the launcher binary. Used
-// for auto-discovery of the dispatcher .so and interceptor .js.
+// launcherRoot resolves the directory that contains the launcher binary.
+// Used for auto-discovery of the preload .so.
 func launcherRoot() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {

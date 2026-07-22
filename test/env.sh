@@ -93,7 +93,6 @@ run_as_user() {
         env
         "LD_LIBRARY_PATH=$VPP_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         "VCL_CONFIG=${VCL_CONFIG:-}"
-        "VCLGO_BACKEND=${VCLGO_BACKEND:-native}"
         "VCLGO_PRELOAD=$VCLGO_PRELOAD"
         "VCLGO_WORKERS=$workers"
         "VCLGO_NOTIFIERS=$notifiers"

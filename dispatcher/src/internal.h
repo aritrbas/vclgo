@@ -3,14 +3,16 @@
  *
  * Not installed; not part of the ABI.
  *
- * This header is used by both the native seccomp/LD_PRELOAD backend (see
+ * This header is used by the native LD_PRELOAD backend (see
  * dispatcher/src/api_native.c, lifecycle_native.c, pool_native.c,
- * registry_native.c) and by legacy Frida-era sources archived under
- * dispatcher/legacy/. The declarations here must be the intersection of
- * what both need: logging, errno helpers, socket metadata struct, epoll
- * event aliases, and the initialization state machine. Backend-specific
- * interfaces live in native_internal.h (native) or the legacy sources'
- * own headers.
+ * registry_native.c). It collects the shared surface: logging, errno
+ * helpers, socket metadata struct, epoll event aliases, and the
+ * initialization state machine. Backend-specific interfaces live in
+ * native_internal.h.
+ *
+ * (Historical note: this file used to also be shared with a retired
+ * Frida-Interceptor-era dispatcher archived under dispatcher/legacy/;
+ * that tree has been deleted. See docs/why_frida_dropped.md.)
  */
 #ifndef VCLGO_INTERNAL_H
 #define VCLGO_INTERNAL_H
