@@ -2,9 +2,8 @@
 # kill_all.sh — nuke every vclgo-related process on this host.
 #
 # Use this when a test script has been Ctrl-Z'd, killed uncleanly, or
-# otherwise left orphan `vclgo run` / `frida` / `echo_{server,client}`
-# processes behind. Safe to run at any time; matches only vclgo-owned
-# names.
+# otherwise left orphan `vclgo run` / `echo_{server,client}` processes
+# behind. Safe to run at any time; matches only vclgo-owned names.
 #
 # Usage:
 #   sudo bash test/kill_all.sh          # normal run
@@ -16,12 +15,10 @@ VERBOSE="${VERBOSE:-0}"
 
 # Order matters: kill the deepest layer first so parents don't restart
 # children. In practice everything vclgo launches is a leaf so order is
-# advisory, but we start with the frida-spawned targets to reduce log
-# noise from "attempted to write to closed peer" during teardown.
+# advisory.
 PATTERNS=(
-    'frida.*interceptor\.js'         # frida CLI + interceptor
-    'examples/echo_server'           # frida-spawned target
-    'examples/echo_client'           # frida-spawned target
+    'examples/echo_server'           # LD_PRELOAD-spawned target
+    'examples/echo_client'           # LD_PRELOAD-spawned target
     'bin/vclgo run'                  # Go launcher
     'bash test/run_smoke\.sh'        # smoke script itself
     'bash test/run_concurrency\.sh'  # concurrency script

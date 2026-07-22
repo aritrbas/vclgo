@@ -21,7 +21,7 @@ export PKG_CONFIG_PATH := $(PKGCFG_DIR):$(PKG_CONFIG_PATH)
 endif
 
 .PHONY: all
-all: pc dispatcher preload frida launcher examples
+all: pc dispatcher preload launcher examples
 
 .PHONY: pc
 pc:
@@ -41,16 +41,12 @@ dispatcher: pc
 preload: dispatcher
 	@$(MAKE) -C preload BIN_DIR="$(BIN_DIR)"
 
-# Phase 3 (in-process fastpath) preload — builds libvclgo_gum_vcl.so from
+# Approach #4 in-process fastpath preload — builds libvclgo_gum_vcl.so from
 # preload/fastpath. Independent of the seccomp preload above; both link
 # against libvclgo_dispatcher.so from ./dispatcher.
 .PHONY: fastpath
 fastpath: dispatcher
 	@$(MAKE) -C preload/fastpath gum_vcl
-
-.PHONY: frida
-frida: dispatcher
-	@$(MAKE) -C frida BIN_DIR="$(BIN_DIR)"
 
 .PHONY: launcher
 launcher:
@@ -67,7 +63,7 @@ examples:
 	done
 
 .PHONY: build
-build: pc dispatcher preload frida launcher examples
+build: pc dispatcher preload launcher examples
 
 # Build everything the fastpath adoption path needs. Equivalent to
 # `build + fastpath` but named so the adoption guide can reference it.
@@ -92,5 +88,4 @@ clean:
 	@$(MAKE) -C dispatcher clean 2>/dev/null || true
 	@$(MAKE) -C preload clean 2>/dev/null || true
 	@$(MAKE) -C preload/fastpath clean 2>/dev/null || true
-	@$(MAKE) -C frida clean 2>/dev/null || true
 	rm -f "$(PKGCFG_DIR)/vppcom.pc"

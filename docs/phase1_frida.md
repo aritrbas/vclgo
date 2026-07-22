@@ -416,9 +416,13 @@ corruption.
 
 ## 13. Legacy backend policy
 
-`VCLGO_BACKEND=frida` remains only for explicit historical diagnostics. A
-legacy run must not be used to claim concurrent correctness, performance, or
-memory safety of native vclgo.
+The Frida Interceptor.attach backend (Approach #2) has been removed from the
+codebase. The `VCLGO_BACKEND=frida` selector, the `vclgo attach <pid>`
+subcommand, the `frida/interceptor.js` agent, and the `dispatcher/legacy/`
+Frida-era dispatcher are all deleted. Only the native LD_PRELOAD path
+(Approach #3 seccomp / Approach #4 fastpath) is buildable. This document is
+retained as the historical record of why Approach #2 was pursued and why it
+was retired; see also [why_frida_dropped.md](why_frida_dropped.md).
 
 Current Approach #4 status and open risks are documented in [status.md](status.md) and
 [analysis_bugs.md](analysis_bugs.md).
