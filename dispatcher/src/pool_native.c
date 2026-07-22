@@ -2,10 +2,11 @@
  * pool_native.c - owner-routed VCL worker pool.
  *
  * Every raw VLS handle is touched only by one permanently pinned pthread.
- * Calls from seccomp notification threads are short synchronous queue
- * submissions.  EAGAIN is returned to Go after the owner arms VLS epoll;
- * readiness is relayed through a real socket-pair surrogate so Go's normal
- * runtime netpoller, deadlines, and cancellation remain authoritative.
+ * Calls from the Approach #4 fastpath preload's interceptor threads are
+ * short synchronous queue submissions. EAGAIN is returned to Go after the
+ * owner arms VLS epoll; readiness is relayed through a real socket-pair
+ * surrogate so Go's normal runtime netpoller, deadlines, and cancellation
+ * remain authoritative.
  */
 
 #include "native_internal.h"

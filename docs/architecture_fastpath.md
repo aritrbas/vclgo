@@ -589,7 +589,8 @@ observed goroutine headroom.
 ## 8. `vclgo_dispatch_impl` — the actual routing
 
 `vclgo_dispatch_impl(nr, a0..a5)` runs on the disp stack. It mirrors
-`dispatch_notification()` from the seccomp path (`preload/preload.c`)
+the `dispatch_notification()` routing switch of the retired seccomp
+preload (removed with the Approach #3 cleanup; visible in git history)
 byte-for-byte in semantics — the only difference is how it was reached
 (function call vs. seccomp notification).
 
@@ -618,7 +619,7 @@ Routing summary:
 | `__NR_shutdown` (48)     | `vclgo_shutdown(...)`           | Raw syscall           |
 | `__NR_fcntl`    (72)     | Reject `F_DUPFD*` on owned fd, else raw | Raw syscall  |
 | `__NR_dup*`     (32,33,292) | EOPNOTSUPP on owned fd        | Raw syscall           |
-| everything else          | Fall through to raw syscall on owned fd (same as preload.c's `default: continued=1`) | Raw syscall |
+| everything else          | Fall through to raw syscall on owned fd (same as the retired seccomp preload's `default: continued=1`) | Raw syscall |
 
 Ownership is decided by `vclgo_owns_fd(fd)` (`dispatcher/src/vclgo.c`),
 which does an O(1) lookup in a hash table indexed by the socket-pair

@@ -1,7 +1,7 @@
-# Fastpath prototype build (M1: probe only, no runtime library yet).
-#
-# Intentionally isolated from the main preload/Makefile so nothing here
-# affects the seccomp preload we currently ship.
+# Fastpath preload build (Approach #4). Produces libvclgo_gum_vcl.so, the
+# only shipping preload for vclgo. The additional M1..M3 targets below are
+# development artifacts (probes and identity/trace variants) kept for
+# diagnostic bring-up work; they are not required for the shipping build.
 
 SHELL := /usr/bin/env bash
 

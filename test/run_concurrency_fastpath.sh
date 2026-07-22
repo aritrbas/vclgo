@@ -1,10 +1,9 @@
 #!/bin/bash
 # Multi-owner stress under the fastpath (libvclgo_gum_vcl.so) preload.
-# Mirrors test/run_concurrency.sh (the seccomp-path harness) but uses
-# LD_PRELOAD instead of the vclgo CLI launcher, so it exercises the
-# in-process syscall patcher end-to-end at both endpoints.
+# Uses LD_PRELOAD to load the in-process syscall patcher end-to-end at
+# both endpoints.
 #
-# Two phases, same as the seccomp harness:
+# Two phases:
 #   1. payload integrity  : CONC × MSGS × SIZE  (default 128 × 32 × 4096)
 #   2. deadline correctness: DEADLINE_CONC idle-read connections with
 #                            a 250 ms Go read deadline; each must fire

@@ -1,11 +1,15 @@
 # Approach #3 architecture — seccomp user notification
 
-This document is the source of truth for the in-tree **Approach #3 / C**
-seccomp backend. The current Approach #4 fastpath is documented in
-[`architecture_fastpath.md`](architecture_fastpath.md). Diagrams for this
-seccomp path are collected in
-[architecture_diagrams.md](architecture_diagrams.md); concurrency proofs are
-in [model_goroutine_pthread.md](model_goroutine_pthread.md).
+> **Historical note (retained on purpose):** the Approach #3 seccomp backend
+> has been removed from the codebase. This document is preserved as the
+> design record of what was built and why, so future maintainers can
+> understand the trade-offs. The only shipping backend is
+> [Approach #4 (fastpath)](architecture_fastpath.md); diagrams for that
+> backend are in
+> [`architecture_diagrams_fastpath.md`](architecture_diagrams_fastpath.md).
+> Diagrams for this seccomp path are collected in
+> [architecture_diagrams.md](architecture_diagrams.md); concurrency proofs
+> are in [model_goroutine_pthread.md](model_goroutine_pthread.md).
 
 ## 1. Problem and design decision
 

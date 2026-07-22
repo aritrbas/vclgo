@@ -1,5 +1,9 @@
 /*
- * lifecycle_native.c - process lifecycle for the LD_PRELOAD/seccomp backend.
+ * lifecycle_native.c - process lifecycle for the LD_PRELOAD backend.
+ *
+ * Called by the Approach #4 fastpath preload (libvclgo_gum_vcl.so). Sets
+ * up the shared VCL application, owns the state machine used by every
+ * dispatcher call, and coordinates teardown across concurrent callers.
  */
 
 #include "native_internal.h"
@@ -8,8 +12,8 @@ int vclgo_log_level = 1;
 atomic_int vclgo_state;
 
 /* Serialises the STOPPING → STOPPED transition so concurrent teardown
- * callers (particularly seccomp notifiers observing `exit_group` on
- * multiple threads) synchronise before returning to the kernel. */
+ * callers (interceptor threads observing `exit_group` on multiple Go
+ * OS-threads) synchronise before returning to the kernel. */
 static pthread_mutex_t g_teardown_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_teardown_cv = PTHREAD_COND_INITIALIZER;
 

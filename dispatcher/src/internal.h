@@ -134,8 +134,9 @@ extern _Atomic uint64_t vclgo_stat_poller_wakeups;
  *
  * The native backend adds STOPPING (transient, held while teardown runs)
  * and STOPPED (terminal, published after teardown completes so that
- * losing exit_group notifiers can wait synchronously before resuming
- * their intercepted syscall).  See native_internal.h and G3 in plan.md.
+ * losing exit_group interceptor threads can wait synchronously before
+ * resuming their intercepted syscall). See native_internal.h and G3 in
+ * plan.md.
  *
  * State transitions are single-writer (whoever won the CAS). Reads on the
  * hot path use atomic_load(&vclgo_state) == ACTIVE as the "we own this

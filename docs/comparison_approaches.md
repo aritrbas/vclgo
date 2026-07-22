@@ -12,8 +12,12 @@ for the byte-level design of the current fastpath.
 - **Approach B** — Frida `Interceptor` (retired; explained in detail so
   the same mistake is not attempted again).
 - **Approach C / #3** — vclgo *seccomp path* (in-tree alternative).
-- **Approach D / #4** — vclgo *fastpath* (current focus, in `preload/fastpath/`;
-  `frida-gum`-based in-process rewriting).
+- **Approach D / #4** — vclgo *fastpath* (only shipping backend, in
+  `preload/fastpath/`; `frida-gum`-based in-process rewriting).
+
+> Note: Approach B and Approach C have been removed from the codebase and
+> are described below only as design history. See
+> [`README.md`](README.md) for the current status matrix.
 
 ---
 
@@ -28,7 +32,7 @@ for the byte-level design of the current fastpath.
 | **Memory footprint added per process** | vclnet library + VLS worker | Frida agent ~10 MiB + JS runtime              | Notifier + owner pthreads (~2 MiB each)        | 8 KiB trampoline page + 512 KiB per pthread disp stack |
 | **Blast radius when it goes wrong** | Compile error / normal Go panic | Whole-process abort (unwinder invariant broken) | Slow app; syscall rejected; VPP-side session stuck | Whole-process abort if invariants broken (§B / §D.6 explains how we avoid) |
 | **Deployment**         | `go get` + code change                   | `LD_PRELOAD` + Frida agent JS                 | `LD_PRELOAD` + `libvclgo_preload.so`           | `LD_PRELOAD` + `libvclgo_gum_vcl.so`              |
-| **Status today**       | Working (source-required)                | **Never worked reliably. Retired.**           | In-tree reference backend                     | TCP/UDP data path and routed UDP/HTTP passed at recorded lab scale |
+| **Status today**       | Working (source-required, separate repo) | **Never worked reliably. Retired; code deleted.** | Retired; code deleted (docs retained for design record) | Only shipping backend. TCP/UDP data path and routed UDP/HTTP passed at recorded lab scale |
 | **Best-fit use case**  | Greenfield / owned Go code               | —                                             | Fleet-wide rollout where perf is second to safety | Fleet-wide rollout where the perf floor of C matters |
 
 ---

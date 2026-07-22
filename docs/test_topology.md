@@ -150,10 +150,12 @@ to the intended VPP instances.
 | `test/run_concurrency_fastpath.sh` | Approach #4 | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP-shaped payload/deadlines over cut-through; diagnostic |
 | `test/run_smoke_udp_fastpath.sh` | Approach #4 | **Acceptance requires two VPPs and separate configs/addresses** | Routed connected + unconnected UDP |
 | `test/run_http_soak_fastpath.sh` | Approach #4 | **Acceptance requires two VPPs and separate configs/addresses** | Routed HTTP over VPP TCP |
-| `test/run_smoke.sh` | Approach #3 | Existing single-VPP harness | Seccomp backend reference, commonly cut-through |
-| `test/run_concurrency.sh` | Approach #3 | Existing single-VPP harness | Seccomp backend reference, commonly cut-through |
-| `test/run_http_soak.sh` | Approach #3 | Existing single-VPP harness | Seccomp backend reference |
 | `test/start_vpp.sh` | Infrastructure | One VPP + loopback | Convenience for local/cut-through tests; does not create routed pair |
+
+> The historical Approach #3 seccomp harnesses (`test/run_smoke.sh`,
+> `test/run_concurrency.sh`, `test/run_http_soak.sh`) were removed
+> alongside the seccomp backend. See [`README.md`](README.md) for the
+> current status matrix.
 
 The UDP and HTTP fastpath scripts still have local-address defaults for
 developer convenience. A run that leaves both endpoints on the same VPP is

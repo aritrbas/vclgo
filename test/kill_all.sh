@@ -1,9 +1,10 @@
 #!/bin/bash
 # kill_all.sh — nuke every vclgo-related process on this host.
 #
-# Use this when a test script has been Ctrl-Z'd, killed uncleanly, or
-# otherwise left orphan `vclgo run` / `echo_{server,client}` processes
-# behind. Safe to run at any time; matches only vclgo-owned names.
+# Use this when a fastpath test script has been Ctrl-Z'd, killed uncleanly,
+# or otherwise left orphan LD_PRELOAD-spawned targets (echo_{server,client},
+# http_{server,client}, udp_echo_{server,client}) behind. Safe to run at
+# any time; matches only vclgo-owned names.
 #
 # Usage:
 #   sudo bash test/kill_all.sh          # normal run
@@ -13,15 +14,19 @@ set -euo pipefail
 
 VERBOSE="${VERBOSE:-0}"
 
-# Order matters: kill the deepest layer first so parents don't restart
-# children. In practice everything vclgo launches is a leaf so order is
+# In practice everything the fastpath tests launch is a leaf, so order is
 # advisory.
 PATTERNS=(
-    'examples/echo_server'           # LD_PRELOAD-spawned target
-    'examples/echo_client'           # LD_PRELOAD-spawned target
-    'bin/vclgo run'                  # Go launcher
-    'bash test/run_smoke\.sh'        # smoke script itself
-    'bash test/run_concurrency\.sh'  # concurrency script
+    'examples/echo_server'               # TCP echo target
+    'examples/echo_client'               # TCP echo target
+    'examples/http_server'               # HTTP target
+    'examples/http_client'               # HTTP target
+    'examples/udp_echo_server'           # UDP echo target
+    'examples/udp_echo_client'           # UDP echo target
+    'bash test/run_smoke_fastpath\.sh'
+    'bash test/run_smoke_udp_fastpath\.sh'
+    'bash test/run_concurrency_fastpath\.sh'
+    'bash test/run_http_soak_fastpath\.sh'
 )
 
 any=0

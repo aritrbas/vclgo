@@ -1,9 +1,13 @@
 /*
  * Public POSIX-shaped API of libvclgo_dispatcher.so.
  *
- * Seccomp notifier threads submit short requests to permanent VCL owner
- * pthreads. Raw VLS handles never leave their owner. All VLS operations are
- * nonblocking; readiness is relayed to Go through real kernel surrogate fds.
+ * The Approach #4 in-process fastpath preload (libvclgo_gum_vcl.so)
+ * intercepts Go's raw SYSCALL instructions via frida-gum byte-level
+ * patches and dispatches through this API. Interceptor threads submit
+ * short requests to permanent VCL owner pthreads owned by this
+ * library. Raw VLS handles never leave their owner. All VLS operations
+ * are nonblocking; readiness is relayed to Go through real kernel
+ * surrogate fds.
  *
  * Functions return ordinary POSIX values and set the caller's libc errno on
  * failure. Range membership is only a fast path: ownership always requires
@@ -28,7 +32,7 @@ extern "C" {
 #define VCLGO_ABI_VERSION 2
 
 /* Non-zero if the dispatcher was built against a compatible VPP. Called by
- * the launcher during handshake so we can fail fast on mismatch. */
+ * the preload during handshake so we can fail fast on mismatch. */
 int vclgo_abi_version(void);
 
 /* ---------- Kernel-surrogate fd namespace -------------------------------- */
@@ -50,9 +54,9 @@ static inline int vclgo_fd_in_reserved_range(int fd) {
     return fd >= (int)VCLGO_FD_BASE && fd < (int)VCLGO_FD_LIMIT;
 }
 
-/* Range membership is only a seccomp fast-path.  This function performs an
- * exact registry lookup and therefore does not mistake an unrelated high fd
- * for a VCL socket. */
+/* Range membership is only a fast-path filter for the interceptor.  This
+ * function performs an exact registry lookup and therefore does not mistake
+ * an unrelated high fd for a VCL socket. */
 int vclgo_owns_fd(int fd);
 
 /* Number of permanently pinned VCL owner workers selected at init. */
@@ -76,11 +80,11 @@ int vclgo_passthrough(void);
  *
  * Synchronous and safe to call from any thread. The first caller performs
  * the work; concurrent callers block until the first caller finishes and
- * only then return. This lets multiple seccomp notifiers observing
- * `exit_group` all resolve their notifications before the intercepted
- * syscall is allowed to proceed — otherwise the kernel would start
- * running `do_exit` on a losing thread while the winner is still inside
- * `vppcom_app_destroy`. See docs/plan.md G3.
+ * only then return. This lets multiple interceptor threads observing
+ * `exit_group` all resolve their intercepts before the syscall is allowed
+ * to proceed — otherwise the kernel would start running `do_exit` on a
+ * losing thread while the winner is still inside `vppcom_app_destroy`.
+ * See docs/plan.md G3.
  */
 void vclgo_teardown(void);
 
