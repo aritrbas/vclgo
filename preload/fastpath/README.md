@@ -39,11 +39,16 @@ make -C ../.. build-fastpath
 
 | File | Purpose |
 |---|---|
-| `gum_vcl.c` | Current VCL-routing preload |
-| `gum_probe.c` | Read-only target/site diagnostic |
-| `gum_full.c` | Identity/trace development variant |
-| `probe_sites.c` | Standalone ELF/disassembly helper |
+| `gum_vcl.c` | VCL-routing preload (shipping) |
+| `Makefile` | Builds `build/libvclgo_gum_vcl.so` |
 | `vendor/` | Vendored Frida-Gum and Capstone |
+
+Bring-up milestones (M1 read-only probe, M2 identity patcher, M2.5 wrapper
+patcher, M2+M2.5 combined, M3a C-dispatcher routing) that led to
+`gum_vcl.c` have been removed from the tree. The design record is preserved
+in [architecture_fastpath.md](../../docs/architecture_fastpath.md) and the
+per-milestone diagrams in
+[architecture_diagrams_fastpath.md](../../docs/architecture_diagrams_fastpath.md).
 
 The active dispatcher lives in `../../dispatcher/src/*_native.c`. It was
 originally shared with the retired Approach #3 seccomp preload; that

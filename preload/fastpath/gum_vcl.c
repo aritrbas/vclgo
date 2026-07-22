@@ -1,9 +1,13 @@
 /*
  * gum_vcl.c — fastpath preload wired to the vclgo dispatcher.
  *
- * This is the M3b+M3c+M3d combined library. It builds on gum_full.c
- * (M2: immediate-NR site patcher + M2.5: function-entry patcher for the
- * 3 generic Go syscall wrappers) and adds the real dispatch machinery:
+ * Combined M3b+M3c+M3d shipping library. Descended from the M1..M3a
+ * bring-up milestones (probe_sites → gum_probe → gum_m2 → gum_m25 →
+ * gum_full → gum_m3, all removed from the tree; see
+ * docs/architecture_diagrams_fastpath.md for the design record). It
+ * combines the M2 immediate-NR SYSCALL-site patcher and the M2.5
+ * function-entry patcher for the three generic Go syscall wrappers,
+ * and adds the real dispatch machinery:
  *
  *   - New: a Syscall6-specific trampoline that converts Go's internal
  *     ABI (a0..a5 in rbx/rcx/rdi/rsi/r8/r9, NR in rax) into the SysV
@@ -28,8 +32,9 @@
  *     for the app. Dtor calls vclgo_teardown().
  *
  * Everything else — M2 site scan/patch and M2.5 wrapper detour — is
- * copied verbatim from gum_full.c. gum_init_embedded() is called exactly
- * once because it is not re-entrant.
+ * the same identity-passthrough logic that was verified in the removed
+ * gum_full milestone. gum_init_embedded() is called exactly once
+ * because it is not re-entrant.
  *
  * The M2 shim from M3a is reused unchanged. It doesn't restore
  * rdi/rsi/rdx/r10/r8/r9 after the C call, which is fine because Go's
@@ -59,7 +64,8 @@
  * calls (connect, read, write on a routed socket) make that window
  * wide enough that the crash was reliably reproducible.
  *
- * Not on the fastpath (left identity-passthrough, same as gum_full.c):
+ * Not on the fastpath (left identity-passthrough, same as the removed
+ * gum_full milestone):
  *   - rawSyscallNoError.abi0 (used only for no-error syscalls like
  *     getpid/getuid — not network)
  *   - rawVforkSyscall.abi0 (used only for vfork/exec — not network)
@@ -766,7 +772,7 @@ emit_shim (uint8_t *dst, void *dispatch_addr)
 /* ============================================================
  * Section 3: M2 site discovery + patching
  *
- * Straight copy of gum_full.c's M2 half. Finds every
+ * Straight copy of the (removed) gum_full milestone's M2 half. Finds every
  *   `mov $NR, %eax|rax; SYSCALL` site inside the main executable's
  * .text and rewrites it as
  *   `CALL rel32 -> per_site_tramp; NOPs`.
@@ -972,7 +978,8 @@ scan_syscall_offset (const uint8_t *entry, size_t max_scan)
 
 /* Trampoline for identity wrappers (rawSyscallNoError, rawVforkSyscall):
  *   [copied prologue] + JMP rel32 to (entry + prologue_len)
- * Byte-for-byte semantic no-op. Same as gum_full.c / M2.5. */
+ * Byte-for-byte semantic no-op. Same as the removed gum_full milestone
+ * (M2.5). */
 static void
 emit_identity_wrapper_tramp (uint8_t *tramp, const wrapper_t *w)
 {

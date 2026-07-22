@@ -408,48 +408,6 @@ session_clear_signal(vclgo_native_session_t *session, uint32_t events)
                    session->fd, events, strerror(errno));
 }
 
-/* N-24: after we transition a session from `not armed` to `armed`, VLS may
- * have delivered a readiness edge in the microscopic window between the
- * failing vls_read/vls_write and the vls_epoll_ctl(ADD) call. Query the
- * fifo state directly; if data (or free space) is present right now,
- * signal Go ourselves and drop the arm. Without this, Go parks waiting
- * for an edge that will never fire.
- *
- * Called only when arming succeeded (i.e., we just added interest).
- * Owner-only, so all mutations are synchronised on this pthread. */
-static void
-session_recheck_after_arm(native_worker_t *worker,
-                          vclgo_native_session_t *session, uint32_t events)
-{
-    vcl_session_handle_t handle = vlsh_to_sh(session->vlsh);
-    if (handle == (vcl_session_handle_t)-1)
-        return;
-
-    uint32_t ready = 0;
-    if (events & VCLGO_EV_READ) {
-        uint32_t nread = 0;
-        uint32_t len = sizeof(nread);
-        if (vppcom_session_attr((uint32_t)handle,
-                                VPPCOM_ATTR_GET_NREAD,
-                                &nread, &len) == 0 && nread > 0)
-            ready |= VCLGO_EV_READ;
-    }
-    if (events & VCLGO_EV_WRITE) {
-        uint32_t nwrite = 0;
-        uint32_t len = sizeof(nwrite);
-        if (vppcom_session_attr((uint32_t)handle,
-                                VPPCOM_ATTR_GET_NWRITE,
-                                &nwrite, &len) == 0 && nwrite > 0)
-            ready |= VCLGO_EV_WRITE;
-    }
-    if (!ready)
-        return;
-
-    (void)session_update_interest(worker, session,
-                                  session->armed & ~ready);
-    session_signal(session, ready);
-}
-
 static int
 create_registered_session(native_worker_t *worker, vls_handle_t vlsh,
                           const vclgo_sock_meta_t *meta)
