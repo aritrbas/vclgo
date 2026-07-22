@@ -5,9 +5,8 @@ SHELL := /usr/bin/env bash
 BIN_DIR   ?= $(abspath ../bin)
 BUILD_DIR := $(abspath ./build)
 
-# Legacy Frida-era sources have been archived under ../legacy/. They are
-# structurally incompatible with the native ABI (v2) and must never re-enter
-# the built library. Keep this list explicit — do not switch to a wildcard.
+# Keep this source list explicit so only the native dispatcher ABI enters the
+# built library; do not replace it with a wildcard.
 SRC := src/addr.c src/api_native.c src/lifecycle_native.c \
        src/pool_native.c src/registry_native.c
 OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC))

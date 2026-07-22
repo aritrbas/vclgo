@@ -15,12 +15,11 @@
 #   * VCL_CONFIG pointing at a readable VCL config.
 #   * A built libvclgo_gum_vcl.so and echo_server/echo_client binaries.
 #
-# G-D2 makes `timeout` safe under this LD_PRELOAD: the fastpath ctor now
+# `timeout` is safe under this LD_PRELOAD: the fastpath constructor
 # probes .text for Go-shaped syscall sites BEFORE touching VPP, so a
 # non-Go helper like `timeout` runs the ctor, finds nothing to patch,
 # and exits without registering with VPP. That means we can use the
-# ordinary `timeout` wrapper here — no manual watchdog needed — even
-# though we could not in the pre-G-D2 smoke harness.
+# ordinary `timeout` wrapper here without registering the helper with VPP.
 
 set -euo pipefail
 
@@ -48,7 +47,7 @@ if [ -z "${VCL_CONFIG:-}" ] || [ ! -f "$VCL_CONFIG" ]; then
     exit 2
 fi
 
-# G-D1: export EVERY variable the exported `run_fastpath` reads so the
+# Export every variable the exported `run_fastpath` reads so the
 # `setsid bash -c '...'` subshell inherits them. Without this the server
 # child sees LD_PRELOAD="" and falls through to the kernel path, and the
 # whole run silently degenerates into a kernel-only stress test.
@@ -153,7 +152,7 @@ fi
 
 # Sanity: server must have actually loaded the fastpath preload with a
 # real VCL bring-up (not passthrough). If the server silently reverted
-# to the kernel path (G-D1 regression) every subsequent measurement is
+# to the kernel path, every subsequent measurement is
 # meaningless, so fail loudly here.
 if ! grep -q '^\[vclgo/gum\] vclgo_init ok .*passthrough=0' \
     "$LOG_DIR/server.log"; then

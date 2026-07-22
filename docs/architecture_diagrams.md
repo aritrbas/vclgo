@@ -1,491 +1,741 @@
-# Approach #3 diagram atlas — seccomp backend
+# Architecture diagram atlas
 
-> **Historical note (retained on purpose):** the Approach #3 seccomp backend
-> has been removed from the codebase. These diagrams are preserved as the
-> design record. Diagrams for the only shipping backend (Approach #4,
-> fastpath) live in
-> [`architecture_diagrams_fastpath.md`](architecture_diagrams_fastpath.md).
-> The Frida-Interceptor diagrams below are comparative failures, not active
-> control flow.
+Last synchronized with code and tests: 2026-07-22.
 
-## 1. Process and thread topology
+This atlas visualizes the current native Frida-Gum fastpath. The narrative
+design is [architecture.md](architecture.md), and exact machine-code examples
+are [text_patching.md](text_patching.md).
 
-```mermaid
-flowchart TB
-    subgraph PROC["One unmodified Go process"]
-        subgraph GO["Filtered Go runtime threads"]
-            G1["Goroutines"]
-            M0["M0"]
-            M1["M1"]
-            MN["M..."]
-            G1 --> M0
-            G1 --> M1
-            G1 --> MN
-        end
+## 1. End-to-end process topology
 
-        subgraph HELP["Unfiltered native helper pthreads"]
-            N0["Notifier 0"]
-            N1["Notifier 1"]
-            NN["Notifier ..."]
-            O0["Owner 0 / bootstrap"]
+~~~mermaid
+flowchart LR
+    subgraph GP["Go process"]
+        G["100+ goroutines"]
+        M["Go runtime Ms<br/>ordinary pthreads"]
+        X["Patched Go .text"]
+        T["Near RX thunks<br/>shared shim"]
+        DS["Per-M dispatcher stacks"]
+        R["Exact fd registry"]
+        F["Real socketpair fds"]
+
+        subgraph OP["Permanent VCL owner pthreads"]
+            O0["Owner 0"]
             O1["Owner 1"]
-            ON["Owner ..."]
+            O2["Owner 2"]
+            O3["Owner 3"]
         end
-
-        REG["Exact fd registry"]
-        SUR["Kernel socket-pair surrogates"]
-
-        M0 & M1 & MN -->|"seccomp USER_NOTIF"| N0 & N1 & NN
-        N0 & N1 & NN -->|"synchronous owner request"| O0 & O1 & ON
-        O0 & O1 & ON --> REG
-        O0 & O1 & ON --> SUR
     end
 
-    O0 & O1 & ON -->|"vls_*"| VCL["libvppcom / VCL shared memory"]
-    VCL --> VPP["VPP main + dataplane workers"]
-    SUR -->|"epoll readiness"| GO
-```
+    G --> M --> X --> T --> DS --> R
+    R --> O0 & O1 & O2 & O3
+    O0 & O1 & O2 & O3 --> F
+    F -->|"Linux epoll / Go netpoll"| M
+    O0 & O1 & O2 & O3 --> VLS["VLS / VCL worker TLS"]
+    VLS --> VPP["VPP main + dataplane/session workers"]
+~~~
 
-Key boundary: Go threads are filtered but never call VLS. Owners call VLS but
-were created before filter installation and are never filtered.
+Goroutines may migrate across Ms. Sessions do not migrate across owners.
+VPP worker selection is independent of both.
 
-## 2. Startup barrier
+## 2. Constructor flow
 
-```mermaid
+~~~mermaid
 flowchart TD
-    A["ELF loader invokes constructor"] --> B{"VCL_CONFIG set?"}
-    B -- no --> P["Record PASSTHROUGH; return"]
-    B -- yes --> R["Raise soft RLIMIT_NOFILE to 1,048,576"]
-    R --> O0["Start bootstrap owner"]
-    O0 --> AC["vls_app_create"]
-    AC --> M{"VLS mode 2 available?"}
-    M -- no --> W1["Use one owner or reject explicit >1"]
-    M -- yes --> ON["Register secondary owners sequentially"]
-    W1 & ON --> BAR["Release owner startup barrier"]
-    BAR --> EP["Each owner creates VLS epoll"]
-    EP --> NT["Create notifier pthread pool"]
-    NT --> TXT["Find executable text address range"]
-    TXT --> SEC["Install NEW_LISTENER + WAIT_KILLABLE_RECV filter"]
-    SEC --> PUB["Publish listener fd to notifiers"]
-    PUB --> G["Return to loader; Go runtime starts"]
-```
+    L["Dynamic loader maps preload"] --> C["Run vclgo_gum_ctor"]
+    C --> D{"VCLGO_DISABLE set?"}
+    D -- yes --> R0["Return without discovery or VCL"]
+    D -- no --> GI["gum_init_embedded"]
+    GI --> MM["Find main executable"]
+    MM --> TX["Find executable .text bounds"]
+    TX --> CS["Capstone linear disassembly"]
+    CS --> IS["Record immediate-NR SYSCALL sites"]
+    TX --> WS["Resolve 3 Go wrapper symbols"]
+    WS --> PV["Validate relocatable entry prologues"]
+    IS --> ANY{"At least one valid path?"}
+    PV --> ANY
+    ANY -- no --> GD["Deinitialize Gum; no VPP registration"]
+    ANY -- yes --> VI["vclgo_init"]
+    VI --> OWN["Start and register permanent VCL owners"]
+    OWN --> NEAR["Allocate two pages near .text as RW"]
+    NEAR --> EMIT["Emit shared shim + site/wrapper thunks"]
+    EMIT --> RX["Protect thunk mapping RX"]
+    RX --> PT["Patch executable .text"]
+    PT --> LOG["Log discovered/patched totals"]
+    LOG --> DONE["Deinitialize Gum; return to Go startup"]
+~~~
 
-No future Go thread can exist before the initial thread acquires the filter,
-so future runtime Ms inherit it.
+Production hardening must make any partial `PT` result fail closed or
+select a tested all-kernel fallback.
 
-## 3. BPF decision flow
+## 3. Process virtual-memory layout
 
-```mermaid
-flowchart TD
-    S["syscall entry"] --> ARCH{"AUDIT_ARCH_X86_64?"}
-    ARCH -- no --> KILL["KILL_PROCESS"]
-    ARCH -- yes --> IP{"IP inside main executable text?"}
-    IP -- no --> ALLOW["ALLOW"]
-    IP -- yes --> NR{"syscall number"}
-    NR -- socket / exit_group / close_range --> NOTIFY["USER_NOTIF"]
-    NR -- fd-based operation --> RANGE{"fd in reserved range?"}
-    RANGE -- no --> ALLOW
-    RANGE -- yes --> NOTIFY
-    NR -- anything else --> ALLOW
-```
+~~~text
+low virtual addresses
 
-The notifier repeats the fd decision with an exact registry lookup. BPF range
-membership alone never establishes ownership.
+0x00400000  +--------------------------------------------------+
+            | Go executable ELF                                |
+            | .text RX                                         |
+            |   patched direct sites                            |
+            |   patched Syscall6 wrapper entry                  |
+            +--------------------------------------------------+
 
-## 4. Socket creation
+near .text  +--------------------------------------------------+
+            | 8 KiB thunk allocation                           |
+            | RW while emitted -> RX before patches run        |
+            |   shared shim                                    |
+            |   16-byte direct-site thunk slots                |
+            |   64-byte wrapper trampoline slots               |
+            +--------------------------------------------------+
 
-```mermaid
+            +--------------------------------------------------+
+            | Go heap, goroutine stacks, runtime metadata       |
+            +--------------------------------------------------+
+
+            +--------------------------------------------------+
+            | one 512 KiB RW MAP_STACK per entering OS thread   |
+            | TLS g_disp_stack_top points near the top           |
+            +--------------------------------------------------+
+
+            +--------------------------------------------------+
+            | native shared libraries                           |
+            | libvclgo_gum_vcl.so                               |
+            | libvclgo_dispatcher.so                            |
+            | libvppcom.so                                      |
+            +--------------------------------------------------+
+
+high virtual addresses
+~~~
+
+## 4. Thunk-page allocation
+
+For `N` immediate sites and `W` resolved wrappers:
+
+~~~text
+page + 0x000
+  +--------------------------------------------------------------+
+  | shared shim: 94 bytes used, 128 bytes reserved               |
+  +--------------------------------------------------------------+ +0x080
+  | immediate site 0: 16-byte slot                               |
+  | immediate site 1: 16-byte slot                               |
+  | ...                                                          |
+  | immediate site N-1                                           |
+  +--------------------------------------------------------------+ +0x080+16N
+  | wrapper 0: 64-byte slot                                      |
+  | wrapper 1: 64-byte slot                                      |
+  | ...                                                          |
+  | wrapper W-1                                                  |
+  +--------------------------------------------------------------+
+  | 0xcc padding                                                  |
+  +--------------------------------------------------------------+ page+8192
+
+allocation formula:
+  required <= 128 + 256*16 + 3*64 = 4416 bytes
+  allocated = 2 * native page size = normally 8192 bytes
+~~~
+
+Every direct `CALL rel32` and every `JMP rel32` is checked for signed
+32-bit reachability. Allocation is requested within 1 GiB of the midpoint of
+Go `.text`.
+
+## 5. Direct immediate-site patch
+
+### 5.1 Seven-byte site
+
+~~~text
+BEFORE — Go .text
+
+address S
+  b8 NN NN NN NN       mov $NR, %eax        5 bytes
+  0f 05                syscall              2 bytes
+address S+7
+  original continuation
+
+AFTER — same addresses, same footprint
+
+address S
+  e8 DD DD DD DD       call site_thunk      5 bytes
+address S+5
+  90 90                nop; nop              2 bytes
+address S+7
+  original continuation
+
+site_thunk — near RX mapping, 16-byte slot
+
+  b8 NN NN NN NN       mov $NR, %eax
+  e9 SS SS SS SS       jmp shared_shim
+  cc cc cc cc cc cc    padding
+~~~
+
+The call pushes `S+5`, a Go `.text` PC. The thunk adds no return address.
+The shim returns to `S+5`, executes the NOPs, and reaches `S+7`.
+
+### 5.2 Nine-byte site
+
+~~~text
+BEFORE
+  48 c7 c0 NN NN NN NN    mov $NR, %rax     7 bytes
+  0f 05                   syscall           2 bytes
+
+AFTER
+  e8 DD DD DD DD          call site_thunk   5 bytes
+  90 90 90 90             nop x4            4 bytes
+~~~
+
+## 6. Generic Syscall6 wrapper patch
+
+### 6.1 Original Go 1.26.1 bytes
+
+~~~text
+409540  49 89 f2                 mov %rsi, %r10
+409543  48 89 fa                 mov %rdi, %rdx
+409546  48 89 ce                 mov %rcx, %rsi
+409549  48 89 df                 mov %rbx, %rdi
+40954c  0f 05                    syscall
+40954e  48 3d 01 f0 ff ff        cmp $-4095, %rax   <- post
+~~~
+
+### 6.2 Entry replacement
+
+~~~text
+409540  e9 DD DD DD DD           jmp Syscall6_thunk
+409545  90                       nop
+409546  original bytes remain but are skipped
+~~~
+
+Capstone selected a six-byte patch boundary: two complete three-byte
+instructions.
+
+### 6.3 Wrapper trampoline
+
+~~~text
+Syscall6_thunk, 29 bytes used in a 64-byte slot
+
+  49 89 f2                     mov %rsi, %r10
+  48 89 fa                     mov %rdi, %rdx
+  48 89 ce                     mov %rcx, %rsi
+  48 89 df                     mov %rbx, %rdi
+  49 bb 4e 95 40 00 00 00
+        00 00                  movabs $0x40954e, %r11
+  41 53                        push %r11
+  e9 SS SS SS SS               jmp shared_shim
+~~~
+
+~~~mermaid
+flowchart LR
+    E["Syscall6 entry"] --> J["JMP wrapper thunk"]
+    J --> C["Recreate Go-to-Linux register moves"]
+    C --> P["PUSH original Go post-SYSCALL PC"]
+    P --> S["JMP shared shim"]
+    S --> D["Native dispatch"]
+    D --> RET["shim RET"]
+    RET --> POST["Original Go errno/result block"]
+    POST --> CALLER["Original Go caller"]
+~~~
+
+The wrapper-thunk mapping never becomes a return address. The synthetic
+return is the original Go PC `0x40954e`.
+
+## 7. Register conversion
+
+~~~text
+Go ABIInternal at Syscall6 entry
+
+  rax = nr
+  rbx = a0
+  rcx = a1
+  rdi = a2
+  rsi = a3
+  r8  = a4
+  r9  = a5
+
+             four MOV instructions
+                       |
+                       v
+
+Linux syscall ABI at shared-shim entry
+
+  rax = nr
+  rdi = a0
+  rsi = a1
+  rdx = a2
+  r10 = a3
+  r8  = a4
+  r9  = a5
+
+             spill and marshal
+                       |
+                       v
+
+SysV ABI for vclgo_dispatch(nr,a0,a1,a2,a3,a4,a5)
+
+  rdi = nr
+  rsi = a0
+  rdx = a1
+  rcx = a2
+  r8  = a3
+  r9  = a4
+  [rsp argument slot] = a5
+~~~
+
+## 8. Shared-shim stack
+
+~~~text
+after PUSH RBP, alignment, and SUB $64
+
+low addresses
+  rsp+0x00  a0 spill
+  rsp+0x08  a1 spill
+  rsp+0x10  a2 spill
+  rsp+0x18  a3 spill
+  rsp+0x20  a4 spill
+  rsp+0x28  a5 spill
+  rsp+0x30  unused
+  rsp+0x38  unused
+  ...
+  saved rbp
+  Go .text return/continuation PC
+high addresses
+~~~
+
+Before calling `vclgo_dispatch`, the shim pushes a5 as the seventh SysV
+argument. `vclgo_dispatch` returns `__int128` in `rax:rdx`; the shim
+restores its frame and returns through the original Go continuation.
+
+## 9. Dispatcher stack switch
+
+~~~mermaid
 sequenceDiagram
-    participant G as Go socket wrapper
-    participant K as seccomp
-    participant N as notifier
-    participant R as round-robin
-    participant O as selected owner
-    participant V as VLS
-    participant F as registry/socketpair
+    participant GS as Goroutine stack
+    participant ND as Naked dispatcher
+    participant TLS as Per-thread TLS
+    participant DS as 512 KiB dispatcher stack
+    participant C as vclgo_dispatch_impl
 
-    G->>K: socket(AF_INET, SOCK_STREAM|flags, TCP)
-    K->>N: USER_NOTIF
-    N->>R: choose owner
-    R-->>N: owner i
-    N->>O: NOP_SOCKET
-    O->>V: vls_create(TCP, nonblocking)
-    V-->>O: vlsh
-    O->>F: socketpair + duplicate fd >= 0xF0000
-    O->>F: prefill app->private queue (suppress EPOLLOUT)
-    O->>F: insert exact registry entry
-    F-->>O: high real fd
-    O-->>N: high fd
-    N-->>K: response.val = fd
-    K-->>G: normal syscall return
-```
-
-## 5. Blocking read and deadline
-
-```mermaid
-sequenceDiagram
-    participant G as goroutine
-    participant M as Go M
-    participant N as notifier
-    participant O as owner
-    participant V as VLS
-    participant S as socketpair
-    participant P as Go netpoll
-    participant T as Go timer
-
-    G->>M: Read
-    M->>N: read notification
-    N->>O: NOP_READ
-    O->>V: vls_read
-    V-->>O: EAGAIN
-    O->>V: VLS epoll ADD EPOLLIN
-    O-->>N: EAGAIN
-    N-->>M: kernel returns EAGAIN
-    M->>P: park G on real surrogate fd
-    par data arrives
-        V-->>O: EPOLLIN
-        O->>S: private -> app readiness byte
-        S-->>P: kernel EPOLLIN
-        P-->>G: runnable; retry
-    and deadline fires
-        T->>P: expire pollDesc deadline
-        P-->>G: runnable with timeout
+    GS->>ND: call with nr,a0..a5
+    ND->>GS: save rbp and SysV argument registers
+    ND->>TLS: obtain g_disp_stack_top
+    alt first use on this OS thread
+        TLS->>DS: mmap 512 KiB MAP_STACK
+        DS-->>TLS: aligned top
     end
-```
+    ND->>DS: switch rsp; save old goroutine rsp
+    ND->>C: call on dispatcher stack
+    C-->>ND: rax:rdx
+    ND->>GS: pop old rsp; restore rbp
+    ND-->>GS: return
+~~~
 
-VCL does not own the deadline. There is no hidden pthread wait that must be
-canceled when a Go context or timer expires.
+~~~text
+Goroutine stack is parked              Active dispatcher stack
 
-## 6. Write readiness encoding
+Go caller return PC                    +-------------------------+ high
+Go post-SYSCALL PC                     | 128-byte cushion        |
+shared-shim frame                      | saved goroutine rsp     |
+return-to-shim PC                      | a5 SysV stack argument  |
+naked-dispatch entry frame             | C dispatcher frames     |
+                                       | request wait frames      |
+                                       +-------------------------+ low
+~~~
 
-```text
-Socket pair directions are independent:
+The deep VCL path runs only after the stack switch. First-use stack
+allocation and a small fixed save frame occur before it, which is why
+preemption/unwinder stress remains part of production validation.
 
-                  application-visible fd A
-                        high fd
-             +-----------------------------+
-             |                             |
-             |  RX queue: B -> A           |<---- owner sends 1 byte
-             |  EPOLLIN = RX queue nonempty|      to assert READ
-             |                             |
-             |  TX queue: A -> B           |----> owner drains B
-             |  EPOLLOUT = TX has capacity |      to assert WRITE
-             +-----------------------------+
-                               private fd B
-                               owner only
+## 10. Dispatch decision tree
+
+~~~mermaid
+flowchart TD
+    E["nr,a0..a5"] --> EXIT{"nr == exit_group?"}
+    EXIT -- yes --> TD["terminal VCL teardown"] --> KE["raw exit_group"]
+    EXIT -- no --> SOCK{"nr == socket?"}
+    SOCK -- yes --> ROUTE{"INET/INET6 and TCP/UDP?"}
+    ROUTE -- yes --> VC["create VLS session + surrogate"]
+    ROUTE -- no --> KR["raw kernel socket"]
+    SOCK -- no --> OWN{"exact registry lookup of fd=a0"}
+    OWN -- miss --> RAW["raw kernel syscall"]
+    OWN -- hit --> OP{"translated operation?"}
+    OP -- yes --> API["POSIX-shaped vclgo_* API"]
+    OP -- rejected --> ERR["-EOPNOTSUPP or mapped errno"]
+    OP -- no --> SUR["current raw syscall on surrogate<br/>production audit required"]
+~~~
+
+## 11. Session and registry memory
+
+~~~text
+4096 registry buckets
+
+bucket[index(fd)]
+  |
+  +--> session record
+         fd              public high-range socketpair fd
+         signal_fd       owner-only socketpair fd
+         vlsh            raw VLS handle
+         owner           immutable owner number
+         meta            family, datagram, listening, options
+         bound_addr      cached local address
+         connected_peer cached connected-UDP peer
+         refs            atomic lifetime references
+         closing         atomic close winner
+         armed           owner VLS epoll interest mask
+         notified        readiness encoded on surrogate
+         trace[16]       readiness/operation diagnostic ring
+         hash_next       bucket chain
+         owner_next      owner-local session list
+~~~
+
+Registry membership is protected by a mutex. Request and close paths retain a
+session reference before releasing that mutex.
+
+### 11.1 Corruption-control map
+
+| Corruption hazard | Memory/registers at risk | Current control | Residual proof obligation |
+|---|---|---|---|
+| Deep native frames on a small goroutine stack | Go stack, adjacent runtime state, unwind metadata | Naked dispatcher switches to a 512 KiB pthread-local stack before the C/VCL call graph | Long preemption/profiling soak |
+| Anonymous trampoline PC during signal traceback | Go frame chain and GC/unwinder interpretation | Direct sites keep a Go return PC; Syscall6 uses `push Go-post-PC; jmp shim` | Go-version and signal-stress matrix |
+| Go/Linux/SysV register confusion | Syscall arguments and Go return registers | Explicit tables and emitted moves; original Go result block remains authoritative | Unit tests for all six arguments and both return halves |
+| Request freed while an owner uses it | Dispatcher-stack request, borrowed Go buffer pointers | Submitter waits for `done`; owner never retains the request after signaling | GC/preemption stress and injected cancellation |
+| Session freed during read/write/close race | Heap session record, VLS handle, surrogate fds | Exact registry lookup retains `refs`; close removes first; final reference frees | Deterministic race/fault tests |
+| VLS handle used under the wrong pthread TLS | VCL worker-local heap/TLS state | Immutable `session.owner`; every `vls_*` executes on that owner | Owner-affinity assertions and counters |
+| Executable mapping left writable | Patched code and thunk bytes | Thunks are emitted RW and changed to RX before `.text` is redirected | Target-policy and mapping audit |
+| Partial code patch | Mixed raw/redirected control flow | Counted and logged today | Still a P0 blocker: transactional install/rollback |
+
+## 12. Goroutine, owner, and VPP-worker mapping
+
+~~~mermaid
+flowchart LR
+    G1["Goroutine 1"] --> M1["Go M1"]
+    G2["Goroutine 2"] --> M2["Go M2"]
+    G3["Goroutine 3"] --> M1
+    M1 & M2 --> REG["fd registry"]
+
+    REG -->|"session A owner=0"| O0["VCL owner 0"]
+    REG -->|"session B owner=1"| O1["VCL owner 1"]
+    REG -->|"listener L owner=2"| O2["VCL owner 2"]
+    O2 -->|"accepted L/1 owner=2"| O2
+    O2 -->|"accepted L/2 owner=2"| O2
+
+    O0 & O1 & O2 --> VLS["VLS worker-local state"]
+    VLS --> VW0["VPP worker 0"]
+    VLS --> VW1["VPP worker 1"]
+~~~
+
+There is no one-to-one mapping on either side. A session-to-owner relation is
+fixed. VPP's session/transport placement is separate.
+
+## 13. Synchronous owner request
+
+~~~mermaid
+sequenceDiagram
+    participant G as Go goroutine / dispatcher stack
+    participant R as Registry
+    participant Q as Owner queue
+    participant O as Owner pthread
+    participant V as VLS
+
+    G->>R: exact lookup(fd), refs++
+    R-->>G: session(owner=i)
+    G->>G: initialize native_request_t
+    G->>Q: enqueue under queue mutex
+    G->>G: condition wait
+    O->>Q: dequeue
+    O->>V: owner-local vls_* call
+    V-->>O: rv or VPPCOM error
+    O->>G: set rv/error/done; signal
+    G->>R: refs--
+    G->>G: destroy request and return
+~~~
+
+The request borrows application pointers only for this synchronous lifetime.
+It is never retained after completion.
+
+## 14. Surrogate fd and readiness memory
+
+~~~text
+socketpair(AF_UNIX, SOCK_STREAM | NONBLOCK | CLOEXEC)
+
+       public endpoint A                    private endpoint B
+       fd >= 0x000f0000                     owner only
+  +---------------------------+       +---------------------------+
+  | RX queue B -> A           |<------| send one byte             |
+  | nonempty => EPOLLIN       |       | assert READ ready         |
+  |                           |       |                           |
+  | TX queue A -> B           |------>| drain bytes               |
+  | capacity => EPOLLOUT      |       | assert WRITE ready        |
+  +---------------------------+       +---------------------------+
+          |
+          +--> Linux epoll --> Go runtime netpoll
+~~~
 
 Initial state:
-  B -> A empty        => EPOLLIN false
-  A -> B filled       => EPOLLOUT false
 
-READ ready:
-  send(B, 1 byte)     => EPOLLIN true
+~~~text
+B -> A receive queue empty       EPOLLIN false
+A -> B send queue prefilled      EPOLLOUT false
+~~~
 
-READ consumed/reset:
-  recv(A) to EAGAIN   => EPOLLIN false
+VLS readable:
 
-WRITE ready:
-  recv(B) to EAGAIN   => A has send capacity => EPOLLOUT true
+~~~text
+owner sends token B -> A
+  -> Linux marks A EPOLLIN
+  -> Go wakes
+  -> patched read(A) calls vls_read
+  -> token state resets independently of application data
+~~~
 
-WRITE consumed/reset:
-  send(A) to EAGAIN   => EPOLLOUT false
-```
+VLS writable:
 
-The bytes in these queues are readiness tokens/filler only. Application data
-always moves through VLS.
+~~~text
+owner drains A -> B
+  -> Linux gives A send capacity / EPOLLOUT
+  -> Go wakes
+  -> patched write(A) calls vls_write
+  -> owner refills queue to suppress readiness until rearmed
+~~~
 
-## 7. Owner event loop
+## 15. Owner event loop
 
-```mermaid
+~~~mermaid
 flowchart TD
-    LOOP["owner loop"] --> BATCH["dequeue up to 128 requests"]
-    BATCH --> OP["execute nonblocking VLS operation"]
-    OP --> FIN["signal request-local condition variable"]
-    FIN --> WAIT["vls_epoll_wait(timeout 1 ms)"]
-    WAIT --> EV{"events?"}
-    EV -- yes --> LOOK["find session in owner list"]
-    LOOK --> CONN["resolve connect error if connecting"]
-    CONN --> DIS["remove delivered interest"]
-    DIS --> SIG["assert surrogate READ/WRITE transition"]
-    EV -- no --> CP["periodic connect-error poll"]
-    SIG --> CP
-    CP --> STOP{"stop requested?"}
-    STOP -- no --> LOOP
-    STOP -- yes --> QUI["quiesce owner"]
-```
+    L["Owner loop"] --> B["Dequeue up to 128 requests"]
+    B --> H["Execute nonblocking VLS handlers"]
+    H --> EA{"EAGAIN / pending connect?"}
+    EA -- yes --> ARM["Add or modify owner VLS epoll interest"]
+    EA -- no --> DONE["Complete request"]
+    ARM --> DONE
+    DONE --> EP["vls_epoll_wait: up to 128 events, 1 ms"]
+    EP --> EVT{"Event?"}
+    EVT -- yes --> S["Resolve connect result and signal surrogate readiness"]
+    EVT -- no --> POLL["Periodic connect-error and watchdog checks"]
+    S --> POLL
+    POLL --> STOP{"Stopping?"}
+    STOP -- no --> L
+    STOP -- yes --> Q["Cancel queue, quiesce, terminal detach/park"]
+~~~
 
-The short VLS epoll timeout is also the queue wake latency; owner queues do not
-currently have a separate eventfd.
+## 16. TCP connect
 
-## 8. Session heap object
-
-```text
-vclgo_native_session_t (heap)
-+--------------------------------------------------------------+
-| fd                     real application socketpair endpoint   |
-| signal_fd              private owner socketpair endpoint      |
-| vlsh                   raw VLS handle                         |
-| owner                  immutable owner index                  |
-| refs                   atomic lifetime count                  |
-| closing                atomic close gate                      |
-| meta                   family/type/listener/v6-only metadata  |
-| bound_addr/bound_len    bind metadata                         |
-| armed                  owner-only VLS epoll mask              |
-| notified               owner-only surrogate assertion mask    |
-| connecting             owner-only connect state               |
-| connect_error          owner-only SO_ERROR value              |
-| hash_next              registry-lock protected                |
-| worker_next            owner-only list                        |
-+--------------------------------------------------------------+
-
-Mutation domains:
-  registry mutex  -> hash_next and table membership
-  atomics         -> refs, closing
-  owner pthread   -> vlsh and every readiness/connect field
-  immutable       -> owner after construction
-```
-
-There is no raw VLS handle in Go memory, a Frida heap, or a notifier-owned
-global map.
-
-## 9. Request memory and lifetime
-
-```text
-Notifier pthread stack                         Owner pthread
-+------------------------------+               +----------------------+
-| native_request_t req         | --queue ptr-->| dequeue pointer      |
-|  mutex + condition variable  |               | inspect arguments    |
-|  source session ref          |               | call VLS             |
-|  pointers into blocked Go G  |               | write rv/errno       |
-|  rv / errno / done           |<--signal cv---| request_finish       |
-+------------------------------+               +----------------------+
-             |
-             +-- notifier cannot return or destroy req until done == 1
-             +-- blocked Go thread cannot reuse syscall argument stack
-```
-
-The request is stack allocated but not detached. Its condition-variable
-handshake is the lifetime proof.
-
-## 10. Old register-patching failure
-
-The retired Frida path changed live register state at a Go function boundary.
-
-```text
-Go internal ABI at syscall wrapper entry
-+----------------------------------------------------------------+
-| RAX/RBX/RCX/... contain Go ABI arguments and temporaries         |
-| RSP points into a goroutine stack with Go stack-map expectations |
-| return PC expects wrapper body + runtime bookkeeping             |
-+----------------------------------------------------------------+
-             |
-             | Frida trampoline / SysV NativeFunction bridge
-             v
-+----------------------------------------------------------------+
-| arguments reshuffled for C ABI                                   |
-| callback scratch pointer may live in a general register           |
-| result/errno written back through mutable CPU context             |
-| replacement may return before original wrapper body executes      |
-+----------------------------------------------------------------+
-             |
-             v
-Potential outcomes:
-  - stale Frida-heap pointer survives in a register used as code/data;
-  - wrapper-local spill slot receives a value with the wrong ABI meaning;
-  - runtime.entersyscall/exitsyscall balance is bypassed;
-  - return PC/SP state no longer matches Go stack maps;
-  - later Go code faults far away from the hook.
-```
-
-Adding more register saves would only reduce symptoms. It would not establish
-a supported ABI contract between Frida, Go internal ABI, the garbage
-collector, and runtime syscall bookkeeping.
-
-## 11. Native register path
-
-```text
-Original Go wrapper
-+---------------------------------------------------------------+
-| establish normal Go frame / runtime syscall bookkeeping        |
-| load Linux syscall number and arguments into syscall registers |
-| execute SYSCALL                                                |
-+---------------------------------------------------------------+
-                          |
-                          v
-                 kernel seccomp stop
-                          |
-       notifier and owner operate on their own C stacks
-                          |
-                          v
-              kernel installs return value/errno
-                          |
-                          v
-+---------------------------------------------------------------+
-| original instruction after SYSCALL resumes                     |
-| original wrapper epilogue executes                             |
-| original runtime exitsyscall path executes                     |
-| Go ABI registers/stack maps were never rewritten by vclgo      |
-+---------------------------------------------------------------+
-```
-
-The corruption class is removed by deleting register manipulation, not by
-trying to make the manipulation safer.
-
-## 12. Old stack and heap corruption path
-
-```text
-Retired path
-
-goroutine stack (small, movable/growable only through Go-aware frames)
-+------------------------------+
-| Go caller frame              |
-| syscall wrapper frame        |
-| Frida trampoline frame       |  not represented in Go stack maps
-| NativeFunction bridge        |
-| vls_read -> VPP deep frames  |  several KiB, foreign ABI
-+------------------------------+
-          may overwrite guard/adjacent state or confuse unwinding
-
-Frida/V8 heap
-+------------------------------+
-| Memory.alloc scratch         |---- pointer copied into live CPU context
-+------------------------------+          |
-                                          v
-Go resumes with GC/unwinder unaware of that pointer's meaning/lifetime
-```
-
-## 13. New stack separation
-
-```text
-Approach #3 path
-
-Go goroutine stack             Notifier pthread stack      Owner pthread stack
-+----------------------+       +----------------------+    +----------------------+
-| Go caller            |       | seccomp ioctl loop   |    | owner event loop     |
-| original wrapper     |       | shallow translation  |    | vls_read/write/etc.  |
-| kernel syscall stop  |       | request + wait       |    | VPP call depth       |
-+----------------------+       +----------------------+    +----------------------+
- unchanged and blocked           256 KiB configured           2 MiB configured
-
-No VPP frame is pushed on a goroutine stack.
-No Frida/V8 heap exists in the Approach #3 path.
-No callback writes Go registers or stack slots.
-```
-
-`readv` walks bounded iovecs directly; the prior large intermediate
-notifier allocation was removed. No buffer pointer is stored in live Go
-register context.
-
-## 14. Seccomp response signal race
-
-### Unsafe ordinary notification
-
-```mermaid
+~~~mermaid
 sequenceDiagram
-    participant G as blocked Go M
-    participant N as notifier
-    participant O as owner/VCL
-    participant S as SIGURG
+    participant G as net.Dial goroutine
+    participant O as Session owner
+    participant V as VLS
+    participant S as Surrogate
+    participant N as Go netpoll
 
-    N->>O: perform write
-    O-->>N: bytes committed
-    S->>G: nonfatal preemption signal
-    Note over G: notification may be canceled
-    N->>G: NOTIF_SEND
-    Note over N: ENOENT; result not delivered
-    G->>G: retry write
-    Note over G,O: duplicate bytes possible
-```
+    G->>O: connect(fd, peer)
+    O->>V: vls_connect nonblocking
+    alt connected
+        V-->>O: 0
+        O-->>G: 0
+    else pending
+        V-->>O: EAGAIN/EINPROGRESS
+        O->>V: arm EPOLLOUT
+        O-->>G: EINPROGRESS
+        G->>N: wait for writable fd
+        V-->>O: VLS event or polled error
+        O->>S: assert WRITE readiness
+        S-->>N: EPOLLOUT
+        N-->>G: wake
+        G->>O: getsockopt(SO_ERROR)
+        O-->>G: connect result
+    end
+~~~
 
-### Current killable-wait notification
+## 17. TCP listen and accept
 
-```mermaid
+~~~mermaid
+flowchart TD
+    L["listener owner i"] --> A["vls_accept(O_NONBLOCK)"]
+    A --> R{"result"}
+    R -- child --> C["create child surrogate"]
+    C --> SAME["child.owner = i"]
+    R -- EAGAIN --> ARM["arm listener EPOLLIN"]
+    ARM --> GO["return EAGAIN; Go netpoll waits"]
+    EVT["VLS listener readable"] --> SIG["assert surrogate READ"]
+    SIG --> GO2["Go retries accept"]
+~~~
+
+One listener's children do not round-robin across owners.
+
+## 18. UDP flows
+
+### 18.1 Connected UDP
+
+~~~mermaid
 sequenceDiagram
-    participant G as blocked Go M
-    participant N as notifier
-    participant O as owner/VCL
-    participant S as SIGURG
+    participant G as net.DialUDP
+    participant O as Owner
+    participant V as VLS
 
-    N->>G: NOTIF_RECV completes
-    Note over G: wait becomes killable; nonfatal signals deferred
-    N->>O: perform write
-    O-->>N: bytes committed
-    S->>G: SIGURG deferred
-    N->>G: NOTIF_SEND accepted
-    G->>G: syscall returns committed byte count
-    Note over G: deferred signal may now be handled
-```
+    G->>O: socket(SOCK_DGRAM)
+    G->>O: connect(peer)
+    O->>V: get flags
+    O->>V: clear O_NONBLOCK
+    O->>V: vls_connect(peer)
+    O->>V: restore flags
+    O->>O: cache peer sockaddr
+    G->>O: write(payload)
+    O->>V: vls_write / connected send
+    G->>O: read(reply)
+    O->>V: vls_read / connected receive
+~~~
 
-## 15. Concurrent close lifetime
+### 18.2 Unconnected UDP
 
-```mermaid
+~~~mermaid
 sequenceDiagram
-    participant R as read notifier
-    participant C as close notifier
-    participant REG as registry
-    participant O as owner
-    participant H as session heap
+    participant G as net.PacketConn
+    participant O as Owner
+    participant V as VLS
 
-    R->>REG: lookup fd; refs++
-    C->>REG: lookup fd; refs++
-    C->>O: NOP_CLOSE
-    O->>H: closing = 1
-    O->>REG: remove exact fd
-    O->>H: close VLS and both kernel fds
-    O->>H: release base ref
-    O-->>C: close complete
-    R->>O: queued NOP_READ
-    O-->>R: EBADF because closing
-    C->>H: refs--
-    R->>H: refs--, last reference frees
-```
+    G->>O: bind(local address, possibly port 0)
+    O->>O: choose ephemeral port if requested
+    G->>O: sendto(payload, destination)
+    O->>V: vls_sendto(payload, converted endpoint)
+    G->>O: recvfrom(buffer)
+    O->>V: vls_recvfrom(buffer, endpoint output)
+    V-->>O: payload + actual sender
+    O-->>G: payload + converted sender sockaddr
+~~~
 
-No queue element can observe freed session memory because each submitter holds
-a reference through completion.
+Each datagram retains its own boundary and peer address.
 
-## 16. Multi-worker distribution
+## 19. HTTP over TCP
 
-```text
-Application owners (pthread/VLS worker)       VPP process
----------------------------------------       -------------------------
-owner 0: listener L + accepted L/*  --------> main/session worker choice
-owner 1: outbound sockets 1,5,9      --------> dataplane worker 0
-owner 2: outbound sockets 2,6,10     --------> dataplane worker 1
-owner 3: outbound sockets 3,7,11     --------> session queues/shared memory
-
-Round-robin selects owner at socket creation.
-An accepted child stays with the listener owner.
-VPP dataplane worker selection is a separate VPP policy.
-```
-
-“Four vclgo owners” and “two VPP dataplane workers” are distinct dimensions.
-
-## 17. Teardown ownership
-
-```mermaid
+~~~mermaid
 flowchart LR
-    A["stop accepting"] --> B["cancel queued requests"]
-    B --> C["abandon remaining native records/surrogates"]
-    C --> D["nonbootstrap owners quiesce and park"]
-    D --> F["bootstrap performs one vppcom_app_destroy"]
-    F --> G["bootstrap remains parked"]
-    G --> H["kernel exit_group terminates process"]
-```
+    HC["Go http.Client"] --> TR["http.Transport"]
+    TR --> TCP["net.TCPConn"]
+    TCP --> FP["Fastpath TCP path"]
+    FP --> VPP["Routed VPP TCP"]
+    VPP --> HS["Go http.Server"]
 
-Parking the bootstrap after app destroy prevents a pthread TLS destructor from
-running against VCL process state that VPP has already invalidated.
+    KA["Keep-alive mode"] --> REUSE["Reuse ~CONC persistent TCP sessions"]
+    NK["No-keep-alive mode"] --> CHURN["Connect/accept/close for every request"]
+~~~
 
-## 18. Failure containment table
+HTTP does not bypass or extend VCL. It is a higher-level workload that
+exercises the TCP implementation through Go's standard transport.
 
-| Failure | Detection point | Effect |
+## 20. Close race
+
+~~~mermaid
+sequenceDiagram
+    participant R as Read/write request
+    participant C as Close request
+    participant REG as Registry/refcount
+    participant O as Owner
+
+    R->>REG: lookup; refs++
+    C->>REG: atomically set closing; remove entry
+    par in-flight operation
+        R->>O: operation already retained
+        O-->>R: result/error
+        R->>REG: refs--
+    and close
+        C->>O: disarm and vls_close
+        O-->>C: close complete
+        C->>REG: refs--
+    end
+    REG->>REG: free only after final reference
+~~~
+
+New lookups fail after registry removal; retained operations cannot observe a
+freed session record.
+
+## 21. Terminal teardown
+
+~~~mermaid
+stateDiagram-v2
+    [*] --> UNINIT
+    UNINIT --> PASSTHROUGH: VCL_CONFIG absent
+    UNINIT --> INITIALIZING: VCL_CONFIG present
+    INITIALIZING --> ACTIVE: owners ready
+    INITIALIZING --> UNINIT: initialization failed
+    ACTIVE --> STOPPING: exit_group / teardown
+    STOPPING --> STOPPED: queues canceled and app detached
+    PASSTHROUGH --> [*]
+    STOPPED --> [*]
+~~~
+
+~~~mermaid
+flowchart TD
+    E["exit_group intercepted"] --> N["Stop new submissions"]
+    N --> C["Cancel queued requests"]
+    C --> Q["Quiesce owner loops"]
+    Q --> A["Abandon remaining native records/surrogates"]
+    A --> D["Bootstrap owner: one vppcom_app_destroy"]
+    D --> P["Owners park"]
+    P --> K["Raw kernel exit_group"]
+~~~
+
+## 22. Validation topologies
+
+### 22.1 Same-VPP cut-through
+
+~~~mermaid
+flowchart LR
+    C["Go client<br/>4 VCL owners"] --> V["One VPP<br/>2 workers"]
+    S["Go server<br/>4 VCL owners"] --> V
+    C -. "VCL shared-memory local transport<br/>no TCP/UDP packet graph" .-> S
+~~~
+
+### 22.2 Routed acceptance
+
+~~~mermaid
+flowchart LR
+    C["Go client<br/>4 owners"] --> B["VPP B<br/>2 workers<br/>10.77.0.2"]
+    B <-->|"memif TCP segments / UDP datagrams"| A["VPP A<br/>2 workers<br/>10.77.0.1"]
+    A --> S["Go server<br/>4 owners"]
+~~~
+
+See [test_topology.md](test_topology.md) for commands and claim boundaries.
+
+## 23. Failure and production-gap map
+
+| Boundary | Current detection | Required production behavior |
 |---|---|---|
-| VCL config absent | Dispatcher init | Clean kernel passthrough |
-| Invalid owner count | Init parser | Process exits before Go runtime |
-| Mode 2 unavailable with owners >1 | Pool startup | Fail-fast with configuration message |
-| Reserved fd range unavailable | RLIMIT/fd creation | Fail-fast; no ambiguous fake fd |
-| Exact high fd not registered | Notifier lookup | Continue kernel syscall |
-| Owner stopping | Queue admission | `ECANCELED` |
-| Session already closing | Owner request gate | `EBADF` |
-| Unsupported socket option | Owner option switch | `ENOPROTOOPT` |
-| Unsupported duplication | Notifier | `EOPNOTSUPP` |
-| Old kernel rejects killable-wait flag | Filter install | Fail-fast; do not run with duplicate-I/O risk |
+| No Go-shaped code | Constructor log and no VCL init | Retain |
+| Unsafe wrapper prologue | Log and skip | Fail closed or validated compatibility mode |
+| Individual patch failure | Count mismatch in log | Abort/rollback or all-kernel mode |
+| Near allocation failure | Constructor returns | Explicit teardown and deterministic fallback |
+| VCL owner startup failure | Initialization error | No patches; clear fatal/fallback policy |
+| Six-argument raw syscall | Not fully carried | Fix helper and add ABI tests |
+| Unknown syscall on owned fd | Raw operation on surrogate | Explicit translate or reject |
+| Owner queue saturation | Limited logs/watchdog | Counters, latency, queue depth, alerting |
+| Listener concentration | Architectural | Shard/listen strategy and measurements |
+| Go wrapper changes | Runtime discovery log | Supported-version matrix and CI |
+| Signal/preemption stack regression | Crash signature | Multi-hour stress gate |
+| VPP loss/restart | Application error | Defined recovery/failure contract |
+
+## 24. Source map
+
+~~~text
+preload/fastpath/gum_vcl.c
+  discovery
+  direct-site and wrapper patch emitters
+  shared ABI shim
+  dispatcher stack switch
+  syscall routing and kernel-shaped return
+
+dispatcher/src/lifecycle_native.c
+  state machine and VCL application lifetime
+
+dispatcher/src/api_native.c
+  POSIX-shaped public calls
+
+dispatcher/src/pool_native.c
+  permanent owners
+  request queues
+  every vls_* operation
+  VLS epoll
+  TCP and UDP semantics
+
+dispatcher/src/registry_native.c
+  exact fd map
+  refcounts
+  socketpair surrogate
+  readiness state
+~~~

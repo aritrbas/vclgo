@@ -2,9 +2,8 @@
 
 Last updated: 2026-07-22.
 
-This record captures the decisions behind **Approach #4**, the Frida-Gum
-fastpath. The older seccomp decision is Approach #3 and is documented in
-[architecture.md](architecture.md).
+This record captures the decisions behind **Approach #4**, the native
+Frida-Gum fastpath implemented by this repository.
 
 ## Context
 
@@ -45,15 +44,9 @@ overriding libc `socket` or `read` symbols is insufficient.
 The constructor uses Frida-Gum and Capstone as C libraries to find direct
 syscall sites and generic wrappers and splice them to native trampolines.
 
-Rejected alternatives:
-
-| Alternative | Reason |
-|---|---|
-| Frida `Interceptor.attach` + JavaScript | Foreign frames, live context writes, Go stack/ABI mismatch |
-| eBPF tracing | Observes but does not synchronously replace userspace syscall semantics |
-| ptrace supervisor | Excessive context switching and operational complexity |
-| libc symbol wrappers only | Miss Go raw syscalls |
-| Go runtime fork | Violates unmodified-binary requirement |
+The selected mechanism must reach raw Go `SYSCALL` instructions, preserve
+Go-visible return PCs and ABI behavior, and require no application source or
+runtime fork. Native near-text patches satisfy those requirements.
 
 ## D3. Explicit ABI conversion
 
@@ -139,8 +132,8 @@ configs, and memif. Results always identify which topology was used.
 
 Benefits:
 
-- no seccomp notification round-trip;
-- no Frida agent/JavaScript runtime;
+- entirely in-process dispatch after the one-time constructor patch;
+- no external agent or supervisory process;
 - no VLS calls on Go Ms or goroutine stacks;
 - ordinary Go netpoll/deadline behavior;
 - shared TCP/UDP dispatcher for unmodified applications.

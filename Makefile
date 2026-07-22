@@ -1,11 +1,7 @@
 # Top-level orchestrator for vclgo.
 #
-# vclgo now ships a single backend: the Approach #4 in-process fastpath
-# preload (libvclgo_gum_vcl.so) built from preload/fastpath. The retired
-# Approach #2 (Frida Interceptor.attach + JavaScript agent) and Approach #3
-# (seccomp user-notification injector + vclgo launcher) have been removed
-# from the codebase; see docs/why_frida_dropped.md and docs/phase1_frida.md
-# for their retirement records.
+# vclgo ships one backend: the Approach #4 in-process Frida-Gum fastpath
+# preload (libvclgo_gum_vcl.so), built from preload/fastpath.
 #
 # `make pc VPP_PREFIX=/path/to/vpp` renders pkgconfig/vppcom.pc for a specific
 # VPP install; every other target picks it up automatically via
@@ -62,7 +58,7 @@ examples:
 .PHONY: build
 build: pc dispatcher fastpath examples
 
-# Retained as an alias for the historical adoption-guide command.
+# Descriptive alias used by the documentation and test workflow.
 .PHONY: build-fastpath
 build-fastpath: build
 

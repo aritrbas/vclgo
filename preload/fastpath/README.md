@@ -1,32 +1,15 @@
-# Approach #4 fastpath preload
+# Frida-Gum fastpath preload
 
-This directory contains the current Frida-Gum native fastpath for unmodified
-Go applications:
+This directory builds the only vclgo preload:
 
 ```text
 build/libvclgo_gum_vcl.so
 ```
 
-It is not the retired Frida `Interceptor.attach`/JavaScript implementation.
-It uses the Frida-Gum C library and Capstone for executable inspection,
-near-text allocation, and controlled in-memory patch installation.
-
-## Current capability
-
-- discovers and patches Go raw-syscall sites and generic wrappers;
-- converts the Linux syscall ABI to the C/SysV dispatcher ABI;
-- switches to a 512 KiB pthread-local dispatcher stack;
-- routes TCP and UDP through the shared permanent-owner VCL dispatcher;
-- preserves Go epoll/netpoll through real socket-pair surrogate fds;
-- supports kernel passthrough when `VCL_CONFIG` is unset;
-- skips VCL initialization when the preloaded target is not a recognized Go
-  binary.
-
-The current lab evidence includes 128-way cut-through TCP, routed connected
-and unconnected UDP, and routed HTTP with and without keepalive. See
-[status](../../docs/status.md) and
-[test topology](../../docs/test_topology.md) for exact results and
-limitations.
+It embeds the native Frida-Gum library and Capstone. The constructor inspects
+the main Linux/amd64 Go executable, emits near-text thunks plus a shared ABI
+shim, and patches recognized raw-syscall paths in memory. There is no
+external agent or service.
 
 ## Build
 
@@ -35,35 +18,55 @@ make -C ../.. pc VPP_PREFIX=/matching/vpp/prefix
 make -C ../.. build-fastpath
 ```
 
-## Files
+The resulting preload links to
+`../../bin/libvclgo_dispatcher.so` and matching VPP/VCL libraries.
 
-| File | Purpose |
+## Run
+
+```bash
+export VCL_CONFIG=/absolute/path/to/vcl.conf
+export VCLGO_WORKERS=4
+export LD_LIBRARY_PATH=/matching/vpp/lib:${LD_LIBRARY_PATH:-}
+export LD_PRELOAD=$PWD/build/libvclgo_gum_vcl.so
+exec /absolute/path/to/go-application
+```
+
+## Current responsibilities
+
+| Area | Implementation |
 |---|---|
-| `gum_vcl.c` | VCL-routing preload (shipping) |
-| `Makefile` | Builds `build/libvclgo_gum_vcl.so` |
-| `vendor/` | Vendored Frida-Gum and Capstone |
+| Discovery | Enumerate the main executable's `.text`; classify immediate-number syscall sites and generic Go wrappers |
+| Code generation | Allocate an 8 KiB near-text region; emit per-site thunks, wrapper trampolines, and one shared shim |
+| ABI bridge | Convert Go/Linux syscall registers to SysV C arguments, including stack argument `a5` |
+| Stack safety | Enter C dispatch on a 512 KiB pthread-local mapping and restore the Go stack before returning |
+| Dispatch | Route supported VCL-owned TCP/UDP operations to the native dispatcher; raw-call the kernel otherwise |
+| Go return path | Resume the original Go `.text` result/error translation without a trampoline return PC |
+| Lifecycle | Initialize VCL only after recognizing a Go target; coordinate terminal application detach |
 
-Bring-up milestones (M1 read-only probe, M2 identity patcher, M2.5 wrapper
-patcher, M2+M2.5 combined, M3a C-dispatcher routing) that led to
-`gum_vcl.c` have been removed from the tree. The design record is preserved
-in [architecture_fastpath.md](../../docs/architecture_fastpath.md) and the
-per-milestone diagrams in
-[architecture_diagrams_fastpath.md](../../docs/architecture_diagrams_fastpath.md).
+The dispatcher in `../../dispatcher/` owns session routing, permanent VCL
+owner pthreads, socket-pair readiness surrogates, and all `vls_*` calls.
 
-The active dispatcher lives in `../../dispatcher/src/*_native.c`. It was
-originally shared with the retired Approach #3 seccomp preload; that
-backend has been removed from the codebase, so the dispatcher now serves
-this fastpath preload exclusively.
+## Required startup evidence
+
+Run initial validation with `VCLGO_LOG=1` and require:
+
+```text
+[vclgo/gum] vclgo_init ok ... passthrough=0
+[vclgo/gum] patched M2:<patched>/<discovered> wrappers:<patched>/<resolved>
+```
+
+Any incomplete required patch set is a deployment failure even though the
+current constructor only logs individual skips/failures.
 
 ## Boundaries
 
-This is still an engineering prototype. The Go-version/container matrices,
-higher-protocol and long-duration soaks, fault injection, listener sharding,
-and the tested VPP branch's heavy local cut-through churn defect remain open.
+This remains a laboratory implementation. In particular, the raw-kernel
+fallback does not yet forward syscall argument 6, and patch installation is
+not atomic. Those are production blockers. Compatibility, protocol,
+endurance, fault-injection, listener-scaling, and observability gates are
+tracked in [status](../../docs/status.md).
 
-Historical context:
-
-- [Approach comparison](../../docs/comparison_approaches.md)
-- [Why Frida Interceptor was dropped](../../docs/why_frida_dropped.md)
-- [Fastpath architecture](../../docs/architecture_fastpath.md)
-- [Open gates](../../docs/plan.md)
+Detailed machine-code, memory, register, and stack layouts are in
+[text patching](../../docs/text_patching.md); the end-to-end design is in
+[architecture](../../docs/architecture.md); validated network layouts are in
+[test topology](../../docs/test_topology.md).

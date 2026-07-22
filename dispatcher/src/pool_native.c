@@ -1298,10 +1298,9 @@ worker_poll_connect_errors(native_worker_t *worker)
          * no wake. We can detect that by asking VLS for the local
          * address: it's only populated after
          * vcl_session_connected_handler processes the CONNECTED msg
-         * (which is what flips the state to READY). This is the same
-         * signal vclnet uses via vppcom_session_attr(GET_LCL_ADDR)
-         * inside `finishBlockingConnect` (see cgo.go). If we see a
-         * non-zero local port, treat the connect as done. */
+         * (which is what flips the state to READY). Querying
+         * VPPCOM_ATTR_GET_LCL_ADDR exposes that transition: if the local
+         * port is non-zero, treat the connect as done. */
         if (!session->meta.is_dgram)
             continue;
         vcl_session_handle_t handle = vlsh_to_sh(session->vlsh);

@@ -1,9 +1,7 @@
 # Fastpath preload build (Approach #4). Produces libvclgo_gum_vcl.so, the
-# only shipping preload for vclgo. Bring-up milestone artifacts (probe_sites,
-# gum_probe, gum_m2, gum_m25, gum_full, gum_m3) that led to gum_vcl.c have
-# been removed from the tree; see docs/architecture_fastpath.md for the
-# design history and docs/architecture_diagrams_fastpath.md for the
-# per-milestone diagrams.
+# only shipping preload for vclgo. The current design is documented in
+# docs/architecture.md, docs/architecture_diagrams.md, and
+# docs/text_patching.md.
 
 SHELL := /usr/bin/env bash
 

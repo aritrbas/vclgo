@@ -2,10 +2,8 @@
 
 Last updated: 2026-07-22.
 
-This guide covers **Approach #4 / Approach D**, the Frida-Gum fastpath
-selected with `libvclgo_gum_vcl.so`. This is the only backend shipped by
-vclgo; Approaches #2 and #3 have been removed from the codebase (docs
-retained as design record).
+This guide covers the **Approach #4 Frida-Gum fastpath** selected with
+`libvclgo_gum_vcl.so`. It is the only backend built by this repository.
 
 Read [status.md](status.md) and [test_topology.md](test_topology.md) before
 using a test result as deployment evidence.
@@ -20,10 +18,6 @@ Approach #4 is a reasonable candidate when:
 - VPP/VCL libraries, shared memory, and an application socket are available;
 - TCP or UDP is within the implemented compatibility surface;
 - the environment permits the preload to map and patch executable memory.
-
-Prefer source-level integration such as vclnet when the application can be
-rebuilt and changed. Prefer normal VPP LDP for C/C++ applications that call
-libc socket symbols.
 
 ## 2. Compatibility
 
@@ -54,8 +48,8 @@ libc socket symbols.
 - Permission to create executable trampoline mappings and temporarily make
   target text writable during controlled patch installation.
 
-Approach #4 has no seccomp-user-notification requirement and does not need a
-Frida daemon, JavaScript agent, or eBPF program.
+Frida-Gum is embedded as a native static dependency. No external Frida
+service is needed.
 
 ## 4. Build
 
@@ -118,8 +112,7 @@ export LD_PRELOAD=$PWD/preload/fastpath/build/libvclgo_gum_vcl.so
 exec /absolute/path/to/go-application arg1 arg2
 ```
 
-The current launcher is not the authority for Approach #4; use direct
-`LD_PRELOAD` until the fastpath backend option is implemented and tested.
+Direct `LD_PRELOAD` is the supported invocation model.
 
 If `VCL_CONFIG` is unset, patched socket calls stay on the kernel
 passthrough path. `VCLGO_DISABLE=1` disables patching entirely.
@@ -132,34 +125,27 @@ passthrough path. `VCLGO_DISABLE=1` disables patching entirely.
 | `VCLGO_WORKERS` | auto | Permanent owner pthread count, 1–64 |
 | `VCLGO_LOG` | 0 | Lifecycle/call/session diagnostics |
 | `VCLGO_FASTPATH_TRACE` | unset | Extremely verbose syscall trace |
-| `VCLGO_DISABLE` | unset | Constructor no-op when set |
+| `VCLGO_DISABLE` | unset | Constructor leaves the process completely unpatched |
 | `LD_LIBRARY_PATH` | system | Must find the matching VPP/VCL libraries |
 | `LD_PRELOAD` | system | Must include `libvclgo_gum_vcl.so` |
 
-(`VCLGO_NOTIFIERS` was an Approach #3 knob; Approach #3 has been removed
-from the codebase and the variable is no longer referenced anywhere.)
+## 8. Validate startup
 
-## 8. Validate the target
-
-The optional probe reports recognized syscall sites without routing them:
-
-```bash
-LD_PRELOAD=$PWD/preload/fastpath/build/libvclgo_gum_probe.so \
-  /absolute/path/to/go-binary --help
-```
-
-A zero-site result means the binary is not compatible with the current
-patcher or is not a dynamic Go executable. Exact counts can change between Go
-releases; compatibility is determined by successful classification, not by
-hard-coding one historical count.
-
-During a real VCL run, require:
+Start with `VCLGO_LOG=1` and require this line at every Go endpoint:
 
 ```text
 [vclgo/gum] vclgo_init ok ... passthrough=0
 ```
 
-at every Go endpoint.
+Also retain the patch summary:
+
+```text
+[vclgo/gum] patched M2:<patched>/<discovered> wrappers:<patched>/<resolved>
+```
+
+The current constructor logs and skips unrecognized sites. Until startup is
+changed to fail atomically on an incomplete required patch set, any mismatch
+must fail deployment validation even if the application appears to start.
 
 ## 9. First validation sequence
 
@@ -204,7 +190,7 @@ Active init/teardown/reinit in one process is not supported.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| No patch sites | Static/non-Go/unrecognized Go binary | Run the probe; capture Go version and disassembly |
+| No patch sites | Static/non-Go/unrecognized Go binary | Capture Go version, patch log, and disassembly |
 | `passthrough=1` | Missing `VCL_CONFIG` | Supply a readable config |
 | VCL init/app attach failure | Wrong app socket or library/VPP mismatch | Compare config, sockets, build prefix, and permissions |
 | Multiple owners rejected | VLS mode 2 unavailable | Enable `multi-thread-workers`; verify matching VPP/VCL |
@@ -231,6 +217,9 @@ The current routed UDP/HTTP and cut-through concurrency results are a lab
 checkpoint. Before production use, close the open items in
 [plan.md](plan.md), especially:
 
+- preserve all six syscall arguments on every raw-kernel fallback;
+- make required patch installation atomic and fail closed;
+- prove or enforce the borrowed Go-buffer lifetime across owner execution;
 - target Go-version and container-policy matrices;
 - routed raw-TCP, TLS, HTTP/2, and gRPC tests;
 - extended preemption and 100–1,000-goroutine soaks;

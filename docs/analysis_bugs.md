@@ -2,10 +2,7 @@
 
 Last updated: 2026-07-22.
 
-This ledger is current for **Approach #4 / Approach D**, the Frida-Gum
-fastpath. Approach #2 defects are historical and linked at the end. Seccomp
-signal-notification defects belong to Approach #3 and are not current
-fastpath mechanisms.
+This ledger is current for the **Approach #4 Frida-Gum fastpath**.
 
 ## Resolved Approach #4 defects
 
@@ -40,7 +37,12 @@ fastpath mechanisms.
 | O4-09 | S1 | Descriptor alias semantics are absent | Keep `dup`/`TCPConn.File` unsupported or implement open-description lifetime |
 | O4-10 | S2 | 100–1,000-goroutine sustained load saturates one owner/queue | Measure queue depth, owner utilization, and VPP worker distribution |
 | O4-11 | S1 | Active teardown/reinit accesses parked/destroyed VCL state | Contract remains terminal process exit only |
-| O4-12 | S1 | Raw fallback helper carries five arguments | Audit six-argument syscalls on non-owned/passthrough descriptors |
+| O4-12 | S0 | Raw fallback receives `a5` but `raw_syscall5` does not load kernel `%r9` | Production blocker: implement a six-argument helper and add a non-VCL six-argument regression |
+| O4-13 | S0 | Constructor can continue after a required wrapper/site is skipped or a patch write fails | Production blocker: preflight the complete patch set, install atomically or roll back, and fail closed |
+| O4-14 | S1 | Startup failure after VCL initialization may precede `g_did_patch` and miss normal destructor cleanup | Exercise every constructor failure edge and make cleanup state-driven |
+| O4-15 | S1 | `go test ./...` has no Go test files | Add unit tests for classification, result mapping, registry lifetime, sockaddr conversion, and failure injection |
+| O4-16 | S0 | Owner pthread dereferences a borrowed Go buffer while the source M waits outside ordinary cgo instrumentation | Prove GC reachability/non-movement or add a pin/copy contract; force GC and async preemption during I/O |
+| O4-17 | S0 | Immediate-site dispatch may clobber SysV caller-saved registers that a real Linux syscall would preserve | Prove continuation liveness for every supported Go build or explicitly save/restore the required registers |
 
 ## Validation checkpoint
 
@@ -52,7 +54,7 @@ fastpath mechanisms.
 | HTTP keepalive | Two VPPs, memif, global scope | 50,000/50,000 plus 12,800/12,800 passed |
 | HTTP no keepalive | Two VPPs, memif, global scope | 50,000/50,000 plus 12,800/12,800 passed |
 | Post-exit residue | Both routed VPPs | Zero applications/sessions after tested runs |
-| Build/unit/static checks | No VPP | Build, `go test ./...`, and `go vet ./...` passed |
+| Build/static checks | No VPP | Build, `go test ./...`, and `go vet ./...` passed; Go reported every package as `[no test files]` |
 
 For the exact meaning of each topology, see
 [test_topology.md](test_topology.md).
@@ -94,6 +96,10 @@ application/session dumps.
 - [x] Routed HTTP keepalive and fresh-connection modes.
 - [x] Multi-owner VCL and multi-worker VPP configuration.
 - [x] Zero VPP residue after recorded routed runs.
+- [ ] Correct raw-kernel forwarding of syscall argument 6.
+- [ ] Atomic all-or-nothing installation of required patches.
+- [ ] Actual unit tests (current Go packages contain none).
+- [ ] Formal and stress-tested Go-buffer lifetime/pinning contract.
 - [ ] Routed raw-TCP echo gate.
 - [ ] TLS/HTTP2/gRPC matrix.
 - [ ] Go-version and target-container matrix.
@@ -102,12 +108,4 @@ application/session dumps.
 - [ ] Listener/owner saturation evidence.
 - [ ] Automated clean-topology regression.
 
-## Historical mapping
-
-- [why_frida_dropped.md](why_frida_dropped.md) explains the structural
-  failures of Approach #2, Frida Interceptor/JavaScript.
-- [phase1_frida.md](phase1_frida.md) preserves its defect-level audit trail.
-- [architecture.md](architecture.md) and
-  [architecture_diagrams.md](architecture_diagrams.md) document Approach #3,
-  the seccomp backend.
-- [status.md](status.md) is authoritative for current Approach #4 evidence.
+The authoritative release view is [status.md](status.md).

@@ -144,18 +144,13 @@ to the intended VPP instances.
 
 ## Per-test topology matrix
 
-| Test | Backend | Default/required topology | Protocol interpretation |
-|---|---|---|---|
-| `test/run_smoke_fastpath.sh` | Approach #4 | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP API over cut-through; diagnostic |
-| `test/run_concurrency_fastpath.sh` | Approach #4 | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP-shaped payload/deadlines over cut-through; diagnostic |
-| `test/run_smoke_udp_fastpath.sh` | Approach #4 | **Acceptance requires two VPPs and separate configs/addresses** | Routed connected + unconnected UDP |
-| `test/run_http_soak_fastpath.sh` | Approach #4 | **Acceptance requires two VPPs and separate configs/addresses** | Routed HTTP over VPP TCP |
-| `test/start_vpp.sh` | Infrastructure | One VPP + loopback | Convenience for local/cut-through tests; does not create routed pair |
-
-> The historical Approach #3 seccomp harnesses (`test/run_smoke.sh`,
-> `test/run_concurrency.sh`, `test/run_http_soak.sh`) were removed
-> alongside the seccomp backend. See [`README.md`](README.md) for the
-> current status matrix.
+| Test | Required topology | Protocol interpretation |
+|---|---|---|
+| `test/run_smoke_fastpath.sh` | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP API over cut-through; diagnostic |
+| `test/run_concurrency_fastpath.sh` | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP-shaped payload/deadlines over cut-through; diagnostic |
+| `test/run_smoke_udp_fastpath.sh` | **Acceptance requires two VPPs and separate configs/addresses** | Routed connected + unconnected UDP |
+| `test/run_http_soak_fastpath.sh` | **Acceptance requires two VPPs and separate configs/addresses** | Routed HTTP/1 over VPP TCP |
+| `test/start_vpp.sh` | One VPP + loopback | Convenience for local/cut-through tests; does not create routed pair |
 
 The UDP and HTTP fastpath scripts still have local-address defaults for
 developer convenience. A run that leaves both endpoints on the same VPP is
@@ -198,6 +193,7 @@ CLIENT_URL=http://10.77.0.1:8088/ \
 NO_PROXY=10.77.0.1 no_proxy=10.77.0.1 \
 VPP_CLI_SOCK=/tmp/vclgo-native-vpp/cli.sock \
 CLIENT_VPP_CLI_SOCK=/tmp/vclgo-native-vpp-peer/cli.sock \
+HTTP_CLIENT_EXTRA='-max-retries 0' \
 ROUNDS=5 CONC=100 REQS=100 WARMUP_REQS=0 \
 bash test/run_http_soak_fastpath.sh
 ```
@@ -205,7 +201,7 @@ bash test/run_http_soak_fastpath.sh
 Run the fresh-connection variant with the same topology:
 
 ```bash
-HTTP_CLIENT_EXTRA=-no-keepalive \
+HTTP_CLIENT_EXTRA='-no-keepalive -max-retries 0' \
 VPP_PREFIX=/matching/vpp/prefix \
 VCLGO_WORKERS=4 \
 SERVER_VCL_CONFIG=$PWD/test/vcl.native.global.conf \
@@ -262,6 +258,37 @@ sudo "$VPPCTL" -s /tmp/vclgo-native-vpp-peer/cli.sock show session verbose 1
 After both applications have exited, there must be no vclgo applications or
 live sessions on either VPP. During the run, logs must show
 `[vclgo/gum] vclgo_init ok ... passthrough=0` for both endpoints.
+
+## Latest recorded clean run
+
+The 2026-07-22 run used repository commit
+`d0cbd78c394db54cfae9a586058d3bc420320e58`, Go 1.26.1, and
+`v26.10-rc0~231-g0a143dac6` VPP/VCL. VPP A used main CPU 50 plus workers
+51–52; VPP B used main CPU 53 plus workers 54–55. The isolated runtime roots
+were `/tmp/vclgo-main-a` and `/tmp/vclgo-main-b`; routed addresses were
+`10.77.0.1/24` and `10.77.0.2/24`.
+
+| Test | Result | Elapsed or rate |
+|---|---:|---:|
+| Cut-through smoke, 4 connections × 8 × 1024 B | 32,768 B each way, 0 errors | 25.633816 ms |
+| Cut-through concurrency, 128 × 32 × 4096 B | 16,777,216 B each way, 0 errors | 67.125591 ms |
+| Cut-through deadlines, 100 idle reads at 250 ms | 100/100 passed | 277.097051 ms |
+| Routed connected UDP, 128 × 8 × 512 B | 524,288 B each way, 0 errors | 37.053562 ms |
+| Routed unconnected UDP, 128 × 8 × 512 B | 524,288 B each way, 0 errors | 113.067195 ms |
+| Routed HTTP keepalive, five 10,000-request rounds | 50,000/50,000 | 20.0–22.5 krps |
+| Routed HTTP fresh connections, five 10,000-request rounds | 50,000/50,000 | 12.5–13.8 krps |
+| Routed HTTP keepalive, 128 × 100 | 12,800/12,800 | 23.56 krps |
+| Routed HTTP fresh connections, 128 × 100 | 12,800/12,800 | 11.89 krps |
+
+HTTP retries and warmup were disabled, so failures were not hidden. Across
+the routed HTTP variants, 125,600 requests succeeded and none failed. Both
+VPP instances reported no applications or sessions after endpoint exit, and
+the process/VPP logs contained none of the configured panic, fatal,
+SIGSEGV, assertion, unwinder, queue-corruption, or cut-through crash
+signatures.
+
+These results do not include a routed raw-TCP echo test; routed HTTP supplies
+TCP transport evidence but does not replace that open gate.
 
 ## Invalid claims to avoid
 

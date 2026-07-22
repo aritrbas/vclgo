@@ -1,23 +1,29 @@
 # Four approaches to bringing unmodified Go apps to VPP/VCL
 
+> **Archived comparison.** This is a historical decision record, not a list
+> of selectable or buildable backends. Only Approach #4 exists in the
+> current code. Historical file names, estimates, and commands in the body
+> are retained to explain the decision and must not be used as current
+> operational guidance.
+
 This document is the executive- and engineering-audience comparison of the
 four integration approaches prototyped for running Go workloads over
-VPP's VCL session layer, plus a deep low-level comparison of the two native
-`LD_PRELOAD` backends. Approach #4 is the current focus.
+VPP's VCL session layer. Approach #4 is the resulting and only current
+implementation.
 
-Read this alongside [`architecture_fastpath.md`](architecture_fastpath.md)
+Read this alongside [the current architecture](../architecture.md)
 for the byte-level design of the current fastpath.
 
 - **Approach A** — `vclnet` (source-level Go/CGo bindings).
 - **Approach B** — Frida `Interceptor` (retired; explained in detail so
   the same mistake is not attempted again).
-- **Approach C / #3** — vclgo *seccomp path* (in-tree alternative).
+- **Approach C / #3** — vclgo *seccomp path* (removed; archived design).
 - **Approach D / #4** — vclgo *fastpath* (only shipping backend, in
   `preload/fastpath/`; `frida-gum`-based in-process rewriting).
 
 > Note: Approach B and Approach C have been removed from the codebase and
 > are described below only as design history. See
-> [`README.md`](README.md) for the current status matrix.
+> [current status](../status.md) for the current validation matrix.
 
 ---
 
@@ -208,8 +214,9 @@ what we did.
 Frida's `Interceptor.attach` failure showed us exactly *which* Go
 runtime invariants matter:
 
-- The Go unwinder invariant (§9.1 of `architecture_fastpath.md`).
-- The goroutine stack invariant (§9.2 of `architecture_fastpath.md`).
+- The Go unwinder invariant documented in the
+  [current text-patching design](../text_patching.md).
+- The goroutine-stack invariant documented in the same design.
 - The netpoll-real-fd invariant.
 - The per-caller-thread TLS invariant.
 
@@ -304,7 +311,7 @@ through the notif_resp to the app, which sees an ordinary syscall return.
 
 ## 5. D: vclgo fastpath — LD_PRELOAD with in-process rewriting
 
-Full details in [`architecture_fastpath.md`](architecture_fastpath.md).
+Full current details are in [`architecture.md`](../architecture.md).
 Summary here for comparison.
 
 ### 5.1 The mechanism in one paragraph
@@ -345,7 +352,8 @@ goroutine stacks (~2 KiB) don't overflow.
 
 ### 5.3 What it cost us
 
-- The two hard invariants of §9 in `architecture_fastpath.md`.  Every
+- The return-PC and goroutine-stack invariants in
+  [`text_patching.md`](../text_patching.md). Every
   clever thing in the code exists because we discovered — the hard way,
   by crashing — what those invariants demand.
 - A vendored copy of `libfrida-gum.a` (2.4 MiB static).  Statically
@@ -358,7 +366,7 @@ goroutine stacks (~2 KiB) don't overflow.
 - `preload/fastpath/gum_vcl.c` — current TCP/UDP fastpath implementation.
 - `preload/fastpath/vendor/frida-gum-17.16.0/` — vendored Frida-Gum
   and Capstone.
-- `docs/architecture_fastpath.md` — deep dive.
+- `docs/architecture.md` and `docs/text_patching.md` — current deep dives.
 
 ---
 
@@ -385,7 +393,7 @@ never sees the syscall unless the dispatcher decides to reissue it.
 ### 6.2 The register + stack picture at interception time
 
 **C: seccomp.**  The app thread's registers hold the syscall arguments in
-SysV syscall ABI (rdi/rsi/rdx/r10/r8/r9, NR in rax).  The kernel saves
+Linux x86-64 syscall ABI (rdi/rsi/rdx/r10/r8/r9, NR in rax). The kernel saves
 this state into the thread's kernel task struct and blocks the thread.
 The notifier pthread receives a `struct seccomp_notif` — a *copy* of the
 registers, delivered by kernel.  From the app's point of view, its
@@ -401,7 +409,7 @@ to.  The shim runs on the goroutine's stack; then `vclgo_dispatch` swaps
 `vclgo_dispatch_impl`; then the swap reverts and `ret` lands the caller
 back on the goroutine stack at the correct PC.  All of this must be safe
 against Go's signal handler running at any instruction boundary — that's
-what §9 of `architecture_fastpath.md` enforces.
+what the current [text-patching design](../text_patching.md) enforces.
 
 ### 6.3 Per-call cost, quantified
 
@@ -502,42 +510,41 @@ Debuggability:
   - Any Linux with `PROT_EXEC` `mmap` (i.e., all).
   - `frida-gum` (statically linked, no runtime dep).
 
-### 6.8 When to pick which
+### 6.8 Historical decision criteria
 
-- **Pick C** when the security story matters more than the per-syscall
+- **C was considered** when the security story mattered more than the per-syscall
   microseconds.  Seccomp gives you kernel-enforced interception; nobody
   in the target process can bypass it by any means.  Also pick C when
   you're worried about the fastpath's invariants for a specific target
   (e.g., a heavily-patched or JIT-heavy Go binary that manipulates its
   own `.text`).
-- **Pick D** when VCL's performance headroom is what motivated the
+- **D was selected** when VCL's performance headroom was what motivated the
   whole exercise.  You give up kernel-enforced interception in exchange
   for a syscall overhead close to a normal function call.  For any
   network-bound workload trying to actually beat kernel networking, D
   is the point of the whole project.
 
-### 6.9 They are not mutually exclusive
+### 6.9 Prototype relationship
 
-The dispatcher (`libvclgo_dispatcher.so`) is shared between C and D.
-Both libraries can be shipped, but selection is currently made by choosing
-the `LD_PRELOAD` library. There is no tested `VCLGO_MODE` hot switch.
-Rollback from D means restarting without the fastpath preload or explicitly
-preloading C.
+The prototypes once shared `libvclgo_dispatcher.so`. The current tree
+contains only D, has no backend hot switch, and rolls back by restarting
+without `libvclgo_gum_vcl.so`.
 
 ---
 
-## 7. Where each approach stands, today (2026-07-22)
+## 7. Archive disposition (2026-07-22)
 
-- **A: vclnet** — Working.  Ready for use in code you own.
+- **A: vclnet** — Separate source-integration project; not evaluated by this
+  repository's current tests.
 - **B: Frida Interceptor** — Retired.  Do not revisit without reading §3
   end-to-end.
-- **C / #3: vclgo seccomp** — Retained as a reference/alternative backend.
-  Its seccomp notification requirements and evidence are separate from D.
-- **D / #4: vclgo fastpath** — Current focus. Both endpoints patch and attach
+- **C / #3: vclgo seccomp** — Retired; implementation removed and design
+  retained under this archive.
+- **D / #4: vclgo fastpath** — Only current implementation. Both endpoints patch and attach
   correctly; TCP and UDP data operations route through VCL. Recorded evidence
   includes 128-way TCP-shaped cut-through payload/deadline tests, routed
   connected and unconnected UDP, and routed HTTP keepalive/no-keepalive
   soaks. It remains an engineering prototype because the Go/container
   matrices, higher protocols, endurance/fault tests, listener sharding, and a
   VPP local cut-through churn defect remain open. See
-  [status.md](status.md) and [test_topology.md](test_topology.md).
+  [status.md](../status.md) and [test_topology.md](../test_topology.md).
