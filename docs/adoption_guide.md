@@ -3,9 +3,9 @@
 Last updated: 2026-07-22.
 
 This guide covers **Approach #4 / Approach D**, the Frida-Gum fastpath
-selected with `libvclgo_gum_vcl.so`. The separate seccomp preload is
-Approach #3 and is retained as an alternative/reference; it is not required
-for the procedure below.
+selected with `libvclgo_gum_vcl.so`. This is the only backend shipped by
+vclgo; Approaches #2 and #3 have been removed from the codebase (docs
+retained as design record).
 
 Read [status.md](status.md) and [test_topology.md](test_topology.md) before
 using a test result as deployment evidence.
@@ -136,8 +136,8 @@ passthrough path. `VCLGO_DISABLE=1` disables patching entirely.
 | `LD_LIBRARY_PATH` | system | Must find the matching VPP/VCL libraries |
 | `LD_PRELOAD` | system | Must include `libvclgo_gum_vcl.so` |
 
-`VCLGO_NOTIFIERS` applies only to Approach #3 and is ignored by the
-fastpath.
+(`VCLGO_NOTIFIERS` was an Approach #3 knob; Approach #3 has been removed
+from the codebase and the variable is no longer referenced anywhere.)
 
 ## 8. Validate the target
 

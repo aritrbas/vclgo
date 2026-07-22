@@ -2,15 +2,15 @@
 
 Last synchronized with the repository: 2026-07-22.
 
-The current implementation focus is **Approach #4 / Approach D**, the
-Frida-Gum native fastpath in `preload/fastpath/`. Approach numbers are:
+vclgo ships a single backend: **Approach #4 / Approach D**, the Frida-Gum
+native fastpath in `preload/fastpath/`. Approach numbers are:
 
 | Number | Letter | Design | Status |
 |---:|:---:|---|---|
-| 1 | A | vclnet source-level integration | Viable when source changes are allowed |
-| 2 | B | Frida `Interceptor.attach` + JavaScript | Retired |
-| 3 | C | seccomp user notification preload | In-tree alternative/reference |
-| 4 | D | Frida-Gum native syscall-site fastpath | Current focus |
+| 1 | A | vclnet source-level integration | Viable when source changes are allowed (separate repo) |
+| 2 | B | Frida `Interceptor.attach` + JavaScript | Retired; code deleted (docs retained) |
+| 3 | C | seccomp user notification preload | Retired; code deleted (docs retained) |
+| 4 | D | Frida-Gum native syscall-site fastpath | **Only shipping backend** |
 
 Approach #4 uses Frida-Gum as a statically linked C patching library. It does
 not use the Frida agent, JavaScript, `Interceptor.attach`, seccomp, or eBPF.
@@ -35,8 +35,8 @@ not use the Frida agent, JavaScript, `Interceptor.attach`, seccomp, or eBPF.
 
 | Document | Scope |
 |---|---|
-| [Seccomp architecture](architecture.md) | Approach #3 only; not the current fastpath |
-| [Seccomp diagrams](architecture_diagrams.md) | Approach #3 only |
+| [Seccomp architecture](architecture.md) | Approach #3 only; code deleted from tree, kept as design reference |
+| [Seccomp diagrams](architecture_diagrams.md) | Approach #3 only; code deleted from tree, kept as design reference |
 | [Why Frida Interceptor was dropped](why_frida_dropped.md) | Explains why Approach #2 failed and why that does not condemn Frida-Gum |
 | [Phase-1 retirement audit](phase1_frida.md) | Historical defect record for Approach #2 |
 

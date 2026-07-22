@@ -1,9 +1,8 @@
 #!/bin/bash
 # End-to-end fastpath (libvclgo_gum_vcl.so) smoke test.
 #
-# Uses LD_PRELOAD with the in-process syscall patcher instead of the
-# seccomp launcher used by run_smoke.sh.  Requires an already-running
-# VPP.
+# Uses LD_PRELOAD with the Approach #4 in-process syscall patcher.
+# Requires an already-running VPP.
 
 set -euo pipefail
 

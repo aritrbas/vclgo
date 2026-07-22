@@ -12,8 +12,8 @@
  *     code so the wrapper's Go-ABI return convention (rax=result,
  *     rbx=result2, rcx=errno) is reconstructed for free.
  *
- *   - New: a C dispatcher `vclgo_dispatch` that mirrors the
- *     dispatch_notification() switch in preload/preload.c 1:1 — checks
+ *   - New: a C dispatcher `vclgo_dispatch` that mirrors the routing
+ *     switch of the retired seccomp preload 1:1 — checks
  *     vclgo_owns_fd(a0), routes owned fds to the vclgo_XXX POSIX-shaped
  *     APIs in libvclgo_dispatcher.so, and executes a raw kernel syscall
  *     otherwise. Returns __int128 so the kernel's rdx (result2) survives
@@ -105,9 +105,10 @@ static _Atomic uint64_t g_disp_exit_group;
  * observability counters accumulate, but every dispatch decision
  * decays to a raw kernel syscall.
  *
- * This mirrors preload/preload.c which bails out of `start_interceptor`
- * when passthrough is true. We're stricter: we intercept, but do not
- * route to vclgo_XXX APIs (which would return -ENOSYS via active_gate).
+ * This mirrors the retired seccomp preload, which bailed out of
+ * `start_interceptor` when passthrough was true. We're stricter: we
+ * intercept, but do not route to vclgo_XXX APIs (which would return
+ * -ENOSYS via active_gate).
  */
 static gboolean g_passthrough;
 
@@ -170,7 +171,8 @@ should_route_socket (int domain, int type, int protocol)
     return 0;
 }
 
-/* Mirrors preload.c:dispatch_writev. Bounded, no allocation. */
+/* Bounded, no allocation. Matches the retired seccomp preload's
+ * dispatch_writev semantics. */
 static ssize_t
 dispatch_writev (int fd, const struct iovec *iov, int iov_count)
 {
@@ -195,7 +197,8 @@ dispatch_writev (int fd, const struct iovec *iov, int iov_count)
     return total;
 }
 
-/* Mirrors preload.c:dispatch_readv. Bounded, no allocation. */
+/* Bounded, no allocation. Matches the retired seccomp preload's
+ * dispatch_readv semantics. */
 static ssize_t
 dispatch_readv (int fd, const struct iovec *iov, int iov_count)
 {
@@ -246,10 +249,11 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
 {
     atomic_fetch_add_explicit (&g_disp_total, 1, memory_order_relaxed);
 
-    /* Special: process shutdown. Same rationale as preload.c — the
-     * dispatcher-side teardown must complete before we let the kernel
-     * run do_exit on this thread, otherwise concurrent VCL owner
-     * threads would race against exit_group and vppcom_app_destroy. */
+    /* Special: process shutdown. Same rationale as the retired seccomp
+     * preload — the dispatcher-side teardown must complete before we let
+     * the kernel run do_exit on this thread, otherwise concurrent VCL
+     * owner threads would race against exit_group and vppcom_app_destroy.
+     */
     if (nr == __NR_exit_group) {
         atomic_fetch_add_explicit (&g_disp_exit_group, 1,
                                    memory_order_relaxed);
@@ -418,7 +422,7 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
     case __NR_fcntl: {
         int cmd = (int) a1;
         /* dup-family via fcntl breaks our exact-registry ownership
-         * model; refuse the same way preload.c does. */
+         * model; refuse the same way the retired seccomp preload did. */
         if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
             *vclgo_errno_addr () = EOPNOTSUPP;
             rv = -1;
@@ -441,8 +445,8 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
     default: {
         /* Any other syscall that happens to touch an owned fd — we do
          * not know how to translate it, so fall back to a raw kernel
-         * syscall against the surrogate fd. Same as preload.c's
-         * default: continued=1 (kernel-passthrough) behavior. */
+         * syscall against the surrogate fd. Same as the retired seccomp
+         * preload's default: continued=1 (kernel-passthrough) behavior. */
         long lo, hi;
         raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
         return pack128 (lo, hi);
@@ -1079,7 +1083,8 @@ __attribute__ ((constructor))
 static void
 vclgo_gum_ctor (void)
 {
-    /* Escape hatch for debugging. Also honored by preload.c. */
+    /* Escape hatch for debugging. (Was also honored by the retired
+     * seccomp preload.) */
     if (getenv ("VCLGO_DISABLE"))
         return;
 
@@ -1292,10 +1297,10 @@ static void
 vclgo_gum_dtor (void)
 {
     if (!g_did_patch) return;
-    /* Same ordering rationale as preload.c: teardown VCL after all
-     * dispatch traffic has quiesced. The exit_group interception in
-     * vclgo_dispatch already covers the normal exit path; this dtor
-     * is a belt-and-braces net for abnormal exits (dlclose, atexit
-     * ordering issues, etc.). */
+    /* Same ordering rationale as the retired seccomp preload: teardown
+     * VCL after all dispatch traffic has quiesced. The exit_group
+     * interception in vclgo_dispatch already covers the normal exit
+     * path; this dtor is a belt-and-braces net for abnormal exits
+     * (dlclose, atexit ordering issues, etc.). */
     vclgo_teardown ();
 }

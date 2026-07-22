@@ -134,8 +134,10 @@ The topology is part of the test contract:
 - `run_smoke_udp_fastpath.sh` and `run_http_soak_fastpath.sh` are
   configurable; the recorded acceptance runs used two VPP instances, global
   scope, distinct VCL configs, and routed memif addresses.
-- `run_smoke.sh`, `run_concurrency.sh`, and `run_http_soak.sh` exercise
-  the separate Approach #3 seccomp backend.
+
+The retired Approach #2 (Frida Interceptor) and Approach #3 (seccomp)
+backends have been removed from the codebase along with their harnesses.
+Their design records remain under `docs/` for future reference.
 
 Do not describe a same-VPP local-scope pass as a VPP TCP/UDP dataplane pass.
 See [test_topology.md](docs/test_topology.md) for commands and diagrams.
@@ -172,6 +174,7 @@ See [test_topology.md](docs/test_topology.md) for commands and diagrams.
 | [Approach comparison](docs/comparison_approaches.md) | All four approaches |
 | [Risk ledger](docs/analysis_bugs.md) | Fixed defects and remaining risks |
 
-The seccomp documents remain as Approach #3 reference material. The
-retrospectives describe why the old Frida Interceptor design failed; they do
-not apply to the native Frida-Gum fastpath.
+The seccomp documents remain as Approach #3 design reference; the seccomp
+code itself has been removed from the tree. The Frida-Interceptor
+retrospectives describe why the old Approach #2 JavaScript design failed;
+they do not apply to the native Frida-Gum fastpath used by Approach #4.

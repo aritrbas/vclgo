@@ -17,8 +17,9 @@ libvclgo_gum_vcl.so constructor
 ```
 
 It is Frida-Gum-based, not Frida-Interceptor-based, seccomp-based, or
-eBPF-based. The older seccomp backend remains in-tree as Approach #3, but it
-is not the focus of the evidence below.
+eBPF-based. The retired Approach #3 seccomp backend has been removed from
+the codebase (docs retained as design record); Approach #4 is the only
+shipping backend.
 
 The historical “Phase 1/Phase 2” labels are development history, not runtime
 modes. Approach #4 is selected by preloading

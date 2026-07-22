@@ -1,11 +1,10 @@
 #!/bin/bash
 # run_http_soak_fastpath.sh — HTTP soak gate for the fastpath preload
-# (G-D6a / G-D6b). Mirrors test/run_http_soak.sh (the seccomp version)
-# but uses LD_PRELOAD with libvclgo_gum_vcl.so instead of the vclgo CLI
-# launcher, so the entire HTTP path — Go net/http, VCL, VPP session
-# layer — runs against the in-process syscall patcher at both endpoints.
+# (G-D6a / G-D6b). Uses LD_PRELOAD with libvclgo_gum_vcl.so so the entire
+# HTTP path — Go net/http, VCL, VPP session layer — runs against the
+# in-process syscall patcher at both endpoints.
 #
-# Invariants checked per round (same as the seccomp harness):
+# Invariants checked per round:
 #
 #   1. Client `fail` count must be zero.
 #   2. No "unsolicited response" / "superfluous response" / "WriteHeader

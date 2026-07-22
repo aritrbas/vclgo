@@ -1,5 +1,10 @@
 #!/bin/bash
-# Shared path resolution and process environment for native vclgo tests.
+# Shared path resolution and process environment for vclgo tests.
+#
+# vclgo now ships a single backend: the Approach #4 in-process fastpath
+# preload (libvclgo_gum_vcl.so). This file provides the VPP-side path
+# resolution common to every test harness under test/. Fastpath-specific
+# variables (e.g. VCLGO_GUM_LIB) live in the individual test scripts.
 
 set -o pipefail
 
@@ -26,7 +31,6 @@ fi
 
 : "${VCLGO_REPO:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${VCLGO_BIN:=$VCLGO_REPO/bin}"
-: "${VCLGO_PRELOAD:=$VCLGO_BIN/libvclgo_preload.so}"
 
 if [ -z "${RUN_AS_USER:-}" ]; then
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
@@ -41,7 +45,7 @@ if [ -z "${RUN_AS_HOME:-}" ]; then
 fi
 
 export VPP_PREFIX VPP_BIN VPPCTL VPP_LIB
-export VCLGO_REPO VCLGO_BIN VCLGO_PRELOAD RUN_AS_USER RUN_AS_HOME
+export VCLGO_REPO VCLGO_BIN RUN_AS_USER RUN_AS_HOME
 
 require_vpp_paths() {
     local missing=0
@@ -62,49 +66,8 @@ require_vpp_paths() {
 Set VPP_PREFIX to the matching VPP install, for example:
 
   VPP_PREFIX=/home/aritrbas/vpp/vpp/build-root/install-vpp-native/vpp \
-    VCL_CONFIG=... bash test/run_smoke.sh
+    VCL_CONFIG=... bash test/run_smoke_fastpath.sh
 HINT
         return 1
     fi
 }
-
-require_vclgo_paths() {
-    local missing=0
-    local path
-    for path in         "$VCLGO_BIN/vclgo"         "$VCLGO_BIN/libvclgo_dispatcher.so"         "$VCLGO_PRELOAD"         "$VCLGO_BIN/examples/echo_server"         "$VCLGO_BIN/examples/echo_client"
-    do
-        if [ ! -e "$path" ]; then
-            echo "env.sh: missing $path" >&2
-            missing=1
-        fi
-    done
-    if [ "$missing" -ne 0 ]; then
-        echo "Build first: make -C $VCLGO_REPO build" >&2
-        return 1
-    fi
-}
-
-# Run a command as the invoking non-root user while preserving only the
-# settings required by the native preload backend.
-run_as_user() {
-    local workers="${VCLGO_WORKERS:-4}"
-    local notifiers="${VCLGO_NOTIFIERS:-32}"
-    local -a command_env=(
-        env
-        "LD_LIBRARY_PATH=$VPP_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        "VCL_CONFIG=${VCL_CONFIG:-}"
-        "VCLGO_PRELOAD=$VCLGO_PRELOAD"
-        "VCLGO_WORKERS=$workers"
-        "VCLGO_NOTIFIERS=$notifiers"
-        "VCLGO_LOG=${VCLGO_LOG:-1}"
-        "GOTRACEBACK=${GOTRACEBACK:-crash}"
-    )
-
-    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
-        sudo -u "$RUN_AS_USER" "${command_env[@]}"             "PATH=$PATH" "HOME=$RUN_AS_HOME" "$@"
-    else
-        "${command_env[@]}" "$@"
-    fi
-}
-
-export -f run_as_user

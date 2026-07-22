@@ -1,10 +1,12 @@
 # Approach #3 diagram atlas — seccomp backend
 
-These diagrams describe the in-tree Approach #3 seccomp path. Approach #4 is
-the current focus and has its own
-[`architecture_diagrams_fastpath.md`](architecture_diagrams_fastpath.md).
-The Frida-Interceptor diagrams here are comparative failures, not active
-control flow.
+> **Historical note (retained on purpose):** the Approach #3 seccomp backend
+> has been removed from the codebase. These diagrams are preserved as the
+> design record. Diagrams for the only shipping backend (Approach #4,
+> fastpath) live in
+> [`architecture_diagrams_fastpath.md`](architecture_diagrams_fastpath.md).
+> The Frida-Interceptor diagrams below are comparative failures, not active
+> control flow.
 
 ## 1. Process and thread topology
 

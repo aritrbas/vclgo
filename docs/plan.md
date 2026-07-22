@@ -12,10 +12,10 @@ of goroutines, multiple VCL owner pthreads, and multi-worker VPP.
 
 | # | Name | Decision |
 |---:|---|---|
-| 1 | vclnet/source integration | Use when application source can change |
-| 2 | Frida Interceptor/JavaScript | Retired: unsafe Go ABI, stack, TLS, and fd boundary |
-| 3 | seccomp user notification | Kept as an in-tree alternative/reference |
-| 4 | Frida-Gum native fastpath | Current focus |
+| 1 | vclnet/source integration | Use when application source can change (separate repo) |
+| 2 | Frida Interceptor/JavaScript | Retired; code deleted (docs retained) |
+| 3 | seccomp user notification | Retired; code deleted (docs retained) |
+| 4 | Frida-Gum native fastpath | **Only shipping backend** |
 
 The old Phase 1/2/3 labels are chronology, not configurable modes. Approach
 number 4 is selected with `LD_PRELOAD=.../libvclgo_gum_vcl.so`.

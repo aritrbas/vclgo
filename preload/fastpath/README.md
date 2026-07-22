@@ -45,8 +45,10 @@ make -C ../.. build-fastpath
 | `probe_sites.c` | Standalone ELF/disassembly helper |
 | `vendor/` | Vendored Frida-Gum and Capstone |
 
-The active dispatcher lives in `../../dispatcher/src/*_native.c` and is
-shared with the Approach #3 seccomp preload.
+The active dispatcher lives in `../../dispatcher/src/*_native.c`. It was
+originally shared with the retired Approach #3 seccomp preload; that
+backend has been removed from the codebase, so the dispatcher now serves
+this fastpath preload exclusively.
 
 ## Boundaries
 

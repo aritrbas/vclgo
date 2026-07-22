@@ -1,5 +1,12 @@
 # Top-level orchestrator for vclgo.
 #
+# vclgo now ships a single backend: the Approach #4 in-process fastpath
+# preload (libvclgo_gum_vcl.so) built from preload/fastpath. The retired
+# Approach #2 (Frida Interceptor.attach + JavaScript agent) and Approach #3
+# (seccomp user-notification injector + vclgo launcher) have been removed
+# from the codebase; see docs/why_frida_dropped.md and docs/phase1_frida.md
+# for their retirement records.
+#
 # `make pc VPP_PREFIX=/path/to/vpp` renders pkgconfig/vppcom.pc for a specific
 # VPP install; every other target picks it up automatically via
 # PKG_CONFIG_PATH.
@@ -21,7 +28,7 @@ export PKG_CONFIG_PATH := $(PKGCFG_DIR):$(PKG_CONFIG_PATH)
 endif
 
 .PHONY: all
-all: pc dispatcher preload launcher examples
+all: build
 
 .PHONY: pc
 pc:
@@ -37,21 +44,11 @@ pc:
 dispatcher: pc
 	@$(MAKE) -C dispatcher BIN_DIR="$(BIN_DIR)"
 
-.PHONY: preload
-preload: dispatcher
-	@$(MAKE) -C preload BIN_DIR="$(BIN_DIR)"
-
 # Approach #4 in-process fastpath preload — builds libvclgo_gum_vcl.so from
-# preload/fastpath. Independent of the seccomp preload above; both link
-# against libvclgo_dispatcher.so from ./dispatcher.
+# preload/fastpath. Links against libvclgo_dispatcher.so from ./dispatcher.
 .PHONY: fastpath
 fastpath: dispatcher
 	@$(MAKE) -C preload/fastpath gum_vcl
-
-.PHONY: launcher
-launcher:
-	@mkdir -p "$(BIN_DIR)"
-	go build -o "$(BIN_DIR)/vclgo" ./cmd/vclgo
 
 .PHONY: examples
 examples:
@@ -63,20 +60,19 @@ examples:
 	done
 
 .PHONY: build
-build: pc dispatcher preload launcher examples
+build: pc dispatcher fastpath examples
 
-# Build everything the fastpath adoption path needs. Equivalent to
-# `build + fastpath` but named so the adoption guide can reference it.
+# Retained as an alias for the historical adoption-guide command.
 .PHONY: build-fastpath
-build-fastpath: pc dispatcher examples fastpath
+build-fastpath: build
 
 .PHONY: test
 test:
-	@bash test/run_smoke.sh
+	@bash test/run_smoke_fastpath.sh
 
 .PHONY: fmt
 fmt:
-	gofmt -w cmd examples
+	gofmt -w examples
 
 .PHONY: vet
 vet:
@@ -86,6 +82,5 @@ vet:
 clean:
 	rm -rf "$(BIN_DIR)"
 	@$(MAKE) -C dispatcher clean 2>/dev/null || true
-	@$(MAKE) -C preload clean 2>/dev/null || true
 	@$(MAKE) -C preload/fastpath clean 2>/dev/null || true
 	rm -f "$(PKGCFG_DIR)/vppcom.pc"

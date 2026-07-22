@@ -1,10 +1,11 @@
 # Fastpath architecture diagram atlas (Frida-Gum, Approach #4 / D)
 
 These diagrams describe the implementation selected by `LD_PRELOAD=libvclgo_gum_vcl.so`
-— the current project focus. This is the sibling of
-[`architecture_diagrams.md`](architecture_diagrams.md), which covers the
-seccomp path (`libvclgo_preload.so`, Approach #C). The seccomp diagrams
-are neither active nor comparative here: this document stands alone.
+— the only shipping backend. The Approach #3 seccomp backend
+(`libvclgo_preload.so`) has been removed from the codebase; its diagrams
+are preserved in [`architecture_diagrams.md`](architecture_diagrams.md)
+as a design record. Those seccomp diagrams are neither active nor
+comparative here: this document stands alone.
 
 If you want the prose behind these diagrams, read
 [`architecture_fastpath.md`](architecture_fastpath.md). If you want the
@@ -960,10 +961,10 @@ fatal: unexpected return pc for ...
 
 ### 18.2 Alternative approach: seccomp (Approach #3 / C)
 
-The seccomp preload is still in-tree, but it is not the current project
-focus. It is fully documented in `architecture.md` and
-`architecture_diagrams.md`. Backend selection requires choosing the
-preload library and restarting the application.
+The seccomp preload was removed from the codebase alongside this
+retirement pass. Its complete design record is preserved in
+[`architecture.md`](architecture.md) and
+[`architecture_diagrams.md`](architecture_diagrams.md).
 
 ---
 

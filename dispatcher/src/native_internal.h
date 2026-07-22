@@ -1,5 +1,9 @@
 /*
- * native_internal.h - shared state for the native seccomp/LD_PRELOAD backend.
+ * native_internal.h - shared state for the native LD_PRELOAD backend.
+ *
+ * Consumed by the four dispatcher .c files (api_native, lifecycle_native,
+ * pool_native, registry_native). The public surface these produce is what
+ * the Approach #4 fastpath preload (libvclgo_gum_vcl.so) calls into.
  */
 #ifndef VCLGO_NATIVE_INTERNAL_H
 #define VCLGO_NATIVE_INTERNAL_H
@@ -15,9 +19,9 @@
 
 /* Transient: only the CAS winner is inside vclgo_native_pool_stop(). */
 #define VCLGO_STATE_STOPPING 4
-/* Terminal: teardown is finished. Losing exit_group notifiers park here
- * until the winner publishes STOPPED so the intercepted syscall never
- * races vppcom_app_destroy. See G3 in docs/plan.md. */
+/* Terminal: teardown is finished. Losing exit_group interceptor threads
+ * park here until the winner publishes STOPPED so the intercepted syscall
+ * never races vppcom_app_destroy. See G3 in docs/plan.md. */
 #define VCLGO_STATE_STOPPED  5
 
 #define VCLGO_MAX_WORKERS 64
