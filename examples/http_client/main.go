@@ -3,6 +3,9 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +17,23 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+func doGet(client *http.Client, url string, cancelAfter time.Duration) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cancelAfter <= 0 {
+		return client.Do(req)
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	timer := time.AfterFunc(cancelAfter, cancel)
+	defer func() {
+		timer.Stop()
+		cancel()
+	}()
+	return client.Do(req.WithContext(ctx))
+}
 
 // isTransientDialError classifies a Get() error as an idempotent-safe
 // retry candidate. Real HTTP clients do this as a matter of course.
@@ -57,12 +77,31 @@ func main() {
 		"per-GET retry budget for transient dial errors (idempotent-safe)")
 	retryDelay := flag.Duration("retry-delay", 5*time.Millisecond,
 		"initial backoff between retries (doubles each attempt)")
+	insecureTLS := flag.Bool("insecure", false,
+		"skip test-server certificate verification")
+	http2 := flag.Bool("http2", true,
+		"allow HTTP/2 negotiation for HTTPS")
+	requireProto := flag.String("require-proto", "",
+		"require every response protocol, for example HTTP/1.1 or HTTP/2.0")
+	cancelAfter := flag.Duration("cancel-after", 0,
+		"cancel each request after this duration and require context.Canceled")
 	flag.Parse()
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = *noKeepalive
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: *insecureTLS, // Test-only flag for the ephemeral certificate.
+		MinVersion:         tls.VersionTLS12,
+	}
+	transport.ForceAttemptHTTP2 = *http2
+	if !*http2 {
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	}
 	client := &http.Client{Timeout: *timeout, Transport: transport}
 
+	if *cancelAfter > 0 && *warmupReqs > 0 {
+		log.Fatal("-warmup-reqs must be zero with -cancel-after")
+	}
 	if *warmupReqs > 0 {
 		var (
 			wOK   atomic.Int64
@@ -75,7 +114,7 @@ func main() {
 			go func() {
 				defer wwg.Done()
 				for r := 0; r < per; r++ {
-					resp, err := client.Get(*url)
+					resp, err := doGet(client, *url, 0)
 					if err != nil {
 						wFail.Add(1)
 						continue
@@ -97,15 +136,16 @@ func main() {
 	}
 
 	var (
-		ok   atomic.Int64
-		fail atomic.Int64
-		body atomic.Int64
+		ok       atomic.Int64
+		fail     atomic.Int64
+		body     atomic.Int64
+		canceled atomic.Int64
 	)
 
 	var (
-		wg          sync.WaitGroup
-		totRetries  atomic.Int64
-		hardFail    atomic.Int64 // failed even after all retries
+		wg         sync.WaitGroup
+		totRetries atomic.Int64
+		hardFail   atomic.Int64 // failed even after all retries
 	)
 	start := time.Now()
 	for i := 0; i < *conc; i++ {
@@ -119,7 +159,7 @@ func main() {
 				)
 				delay := *retryDelay
 				for attempt := 0; attempt <= *maxRetries; attempt++ {
-					resp, err = client.Get(*url)
+					resp, err = doGet(client, *url, *cancelAfter)
 					if err == nil {
 						if attempt > 0 {
 							totRetries.Add(int64(attempt))
@@ -133,17 +173,33 @@ func main() {
 					delay *= 2
 				}
 				if err != nil {
+					if *cancelAfter > 0 && errors.Is(err, context.Canceled) {
+						canceled.Add(1)
+						continue
+					}
 					log.Printf("[%d] GET: %v", id, err)
+					fail.Add(1)
+					hardFail.Add(1)
+					continue
+				}
+				if *cancelAfter > 0 {
+					resp.Body.Close()
+					log.Printf("[%d] GET completed instead of being canceled", id)
 					fail.Add(1)
 					hardFail.Add(1)
 					continue
 				}
 				n, _ := io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
-				if resp.StatusCode == 200 {
+				if resp.StatusCode == 200 &&
+					(*requireProto == "" || resp.Proto == *requireProto) {
 					ok.Add(1)
 					body.Add(n)
 				} else {
+					if *requireProto != "" && resp.Proto != *requireProto {
+						log.Printf("[%d] protocol=%s, want %s", id,
+							resp.Proto, *requireProto)
+					}
 					fail.Add(1)
 				}
 			}
@@ -159,10 +215,15 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr,
-		"http_client: conc=%d reqs=%d ok=%d fail=%d body_bytes=%d "+
+		"http_client: conc=%d reqs=%d ok=%d canceled=%d fail=%d body_bytes=%d "+
 			"elapsed=%s rps=%.1f\n",
-		*conc, *reqs, ok.Load(), fail.Load(), body.Load(),
+		*conc, *reqs, ok.Load(), canceled.Load(), fail.Load(), body.Load(),
 		elapsed, float64(ok.Load())/elapsed.Seconds())
+	if *cancelAfter > 0 && canceled.Load() != int64(*conc**reqs) {
+		fmt.Fprintf(os.Stderr, "http_client: canceled=%d, want %d\n",
+			canceled.Load(), *conc**reqs)
+		os.Exit(1)
+	}
 	if fail.Load() > 0 {
 		os.Exit(1)
 	}

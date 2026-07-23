@@ -69,6 +69,20 @@ typedef struct vclgo_native_session {
     struct sockaddr_storage bound_addr;
     socklen_t bound_len;
 
+    /*
+     * A connectionless socket explicitly bound to INADDR_ANY/in6addr_any
+     * remains a wildcard listener, but VCL also uses transport.lcl_ip as
+     * the source in each application datagram header. VCL does not select
+     * that source after an already-bound wildcard listener calls sendto().
+     * The owner therefore resolves and caches the route source for the
+     * current destination address before the write. `bound_addr` remains
+     * unchanged so getsockname() retains normal wildcard-bind semantics.
+     */
+    int wildcard_bound;
+    struct sockaddr_storage source_route_peer;
+    socklen_t source_route_peer_len;
+    int has_source_route_peer;
+
     /* UDP peer selected by connect(2). The owner performs VLS connect in
      * blocking mode, then restores O_NONBLOCK before returning to Go.
      * The cache preserves POSIX getpeername/sendto(NULL) semantics even
@@ -83,6 +97,7 @@ typedef struct vclgo_native_session {
     uint32_t notified;
     int connecting;
     int connect_error;
+    int socket_error;
 
     /* Watchdog + trace state. All mutated only by the owner worker. */
     uint64_t last_transition_ns;

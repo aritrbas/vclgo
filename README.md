@@ -18,7 +18,7 @@ pthreads. No source-code change or Go package import is required.
 
 ## Current status
 
-The current branch passes the complete repository fastpath matrix:
+The established baseline fastpath matrix passes:
 
 - 128 concurrent TCP echo connections and 100 simultaneous read deadlines
   over same-VPP VCL cut-through;
@@ -26,11 +26,27 @@ The current branch passes the complete repository fastpath matrix:
 - routed HTTP/1.1 over TCP with keep-alive enabled and disabled;
 - two VPP processes connected by memif, two dataplane workers per VPP, and
   four permanent VCL owners per Go process;
-- zero VPP application/session residue after the routed tests.
+- zero VPP application/session residue in the routed HTTP cleanup gates and
+  focused post-run checks.
 
-This is a strong lab checkpoint, not a production-readiness declaration.
-The exact evidence and remaining promotion gates are maintained in
-[docs/status.md](docs/status.md).
+The expanded routed protocol/error matrix also passes end-to-end. It covers
+IPv6 TCP echo, half-close, refused-connect, real peer reset, connected UDP,
+wildcard-bound unconnected UDP, TLS/HTTP/1.1, TLS/HTTP/2 with exact ALPN,
+HTTP/2 cancellation, and gRPC. The data gates use 100 goroutines; the HTTP
+and gRPC gates complete 3,200 operations each with zero failures. The strict
+UDP port-unreachable gate uses routed IPv4 because the tested VPP revision's
+`udp_connection_handle_icmp()` has no IPv6 implementation.
+
+The intended production topology is **same-VPP app-local VCL cut-through**.
+Exactly two harnesses currently have recorded cut-through passes: the TCP
+smoke harness and the TCP concurrency/deadline harness. The UDP and complete
+HTTP/TLS/HTTP2/gRPC matrix above ran between two VPPs over memif, so it is
+routed evidence, not cut-through evidence. A previously observed VPP crash
+under same-VPP HTTP connection churn remains open.
+
+This is therefore a strong lab checkpoint, not a production-readiness
+declaration. The exact evidence and remaining promotion gates are maintained
+in [docs/status.md](docs/status.md).
 
 ## Architecture
 
@@ -152,10 +168,12 @@ The topology is part of every result:
 
 | Harness | Required interpretation |
 |---|---|
-| `test/run_smoke_fastpath.sh` | Same-VPP TCP plus raw-a5, `sendfile`, and `close_range` regressions |
+| `test/run_smoke_fastpath.sh` | Recorded same-VPP app-local cut-through TCP plus raw-a5, `sendfile`, and `close_range` regressions |
 | `test/run_concurrency_fastpath.sh` | Same-VPP cut-through TCP payload and deadline stress |
 | `test/run_smoke_udp_fastpath.sh` | Acceptance requires two VPPs and routed connected/unconnected UDP |
-| `test/run_http_soak_fastpath.sh` | Acceptance requires two VPPs and routed HTTP over VPP TCP |
+| `test/run_http_soak_fastpath.sh` | Routed HTTP/1.1, TLS, HTTP/2, protocol assertions, and cancellation |
+| `test/run_grpc_fastpath.sh` | Routed concurrent gRPC health RPCs over one HTTP/2 connection |
+| `test/run_protocol_matrix_fastpath.sh` | Composes the routed IPv6 protocol/error acceptance matrix |
 
 A local-scope same-VPP result validates the patcher, ABI bridge, VCL owners,
 surrogate readiness, and cut-through transport. It does not validate TCP or
@@ -181,9 +199,17 @@ the exact topologies, commands, and post-test checks.
 - Arbitrary invalid application pointers are not yet contained and converted
   uniformly to `EFAULT`; executable-memory/text-write policy must be qualified
   in the target container.
-- TLS, HTTP/2, gRPC, IPv6 acceptance, fault injection, Go-version coverage,
-  container policy validation, and multi-hour 100–1,000-goroutine soaks
-  remain promotion gates.
+- Routed IPv4 UDP port-unreachable is delivered to connected Go UDP as exact
+  `ECONNREFUSED`. IPv6 ICMP error delivery remains unavailable in the tested
+  upstream VPP code and is not claimed by vclgo.
+- App-local cut-through is the production target, but only its TCP
+  smoke/payload/deadline subset has a recorded pass. The full UDP and
+  higher-protocol cut-through matrix, live `[CT:*]` assertion, repeated
+  cleanup, and the known HTTP churn crash remain open.
+- The short IPv6/TLS/HTTP2/gRPC matrix is green. Go-version coverage,
+  WebSocket/streaming/control-message cases, container-policy validation,
+  fault recovery, and multi-hour 100–1,000-goroutine soaks remain promotion
+  gates.
 
 ## Documentation
 

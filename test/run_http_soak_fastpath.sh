@@ -75,6 +75,7 @@ VPP_CLI_SOCK="${VPP_CLI_SOCK:-/run/vpp/cli.sock}"
 CLIENT_VPP_CLI_SOCK="${CLIENT_VPP_CLI_SOCK:-$VPP_CLI_SOCK}"
 SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:$PORT}"
 CLIENT_URL="${CLIENT_URL:-http://127.0.0.1:$PORT/}"
+HTTP_NETWORK="${HTTP_NETWORK:-tcp}"
 mkdir -p "$LOG_DIR"
 ulimit -c unlimited 2>/dev/null || true
 
@@ -153,7 +154,8 @@ trap cleanup EXIT INT TERM HUP
 echo "[soak-fp] fastpath lib: $VCLGO_GUM_LIB"
 echo "[soak-fp] starting http_server on $SERVER_ADDR"
 spawn_bg "$LOG_DIR/server.log" "$SERVER_VCL_CONFIG" \
-    "$VCLGO_BIN/examples/http_server" -addr "$SERVER_ADDR"
+    "$VCLGO_BIN/examples/http_server" \
+    -network "$HTTP_NETWORK" -addr "$SERVER_ADDR" ${HTTP_SERVER_EXTRA:-}
 SERVER_PID=$SPAWN_PID
 
 ready=0
@@ -208,25 +210,29 @@ check_vpp_residue_one() {
     local round=$1
     local role=$2
     local socket=$3
-    local app_output session_output apps sessions
-    if ! app_output="$(sudo "$VPPCTL_CMD" -s "$socket" show app 2>&1)"; then
-        echo "[soak-fp] FAIL after $round: cannot query $role VPP at $socket" >&2
-        echo "$app_output" >&2
-        exit 1
-    fi
-    if ! session_output="$(sudo "$VPPCTL_CMD" -s "$socket" show session verbose 1 2>&1)"; then
-        echo "[soak-fp] FAIL after $round: cannot query $role VPP sessions at $socket" >&2
-        echo "$session_output" >&2
-        exit 1
-    fi
-    apps="$(printf '%s\n' "$app_output" | awk 'NR>1 && NF>0 {print}' | wc -l)"
-    sessions="$(printf '%s\n' "$session_output" | grep -cE '^\[' || true)"
-    if [ "$apps" -ne 0 ] || [ "$sessions" -ne 0 ]; then
-        echo "[soak-fp] FAIL after $round: $role VPP residue apps=$apps sessions=$sessions" >&2
-        echo "$app_output" >&2
-        echo "$session_output" >&2
-        exit 1
-    fi
+    local app_output session_output apps sessions attempt
+    for attempt in $(seq 0 "${RESIDUE_RETRIES:-30}"); do
+        if ! app_output="$(sudo "$VPPCTL_CMD" -s "$socket" show app 2>&1)"; then
+            echo "[soak-fp] FAIL after $round: cannot query $role VPP at $socket" >&2
+            echo "$app_output" >&2
+            exit 1
+        fi
+        if ! session_output="$(sudo "$VPPCTL_CMD" -s "$socket" show session verbose 1 2>&1)"; then
+            echo "[soak-fp] FAIL after $round: cannot query $role VPP sessions at $socket" >&2
+            echo "$session_output" >&2
+            exit 1
+        fi
+        apps="$(printf '%s\n' "$app_output" | awk 'NR>1 && NF>0 {print}' | wc -l)"
+        sessions="$(printf '%s\n' "$session_output" | grep -cE '^\[' || true)"
+        if [ "$apps" -eq 0 ] && [ "$sessions" -eq 0 ]; then
+            return
+        fi
+        [ "$attempt" -lt "${RESIDUE_RETRIES:-30}" ] && sleep 1
+    done
+    echo "[soak-fp] FAIL after $round: $role VPP residue apps=$apps sessions=$sessions" >&2
+    echo "$app_output" >&2
+    echo "$session_output" >&2
+    exit 1
 }
 
 check_vpp_residue() {

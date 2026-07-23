@@ -1,6 +1,6 @@
 # Architecture diagram atlas
 
-Last synchronized with code and tests: 2026-07-22.
+Last synchronized with code and tests: 2026-07-23.
 
 This atlas visualizes the current native Frida-Gum fastpath. The narrative
 design is [architecture.md](architecture.md), and exact machine-code examples
@@ -382,11 +382,14 @@ bucket[index(fd)]
          owner           immutable owner number
          meta            family, datagram, listening, options
          bound_addr      cached local address
+         wildcard_bound  source selection required for sendto
+         source_route_peer route already applied to this session
          connected_peer cached connected-UDP peer
          refs            atomic lifetime references
          closing         atomic close winner
          armed           owner VLS epoll interest mask
          notified        readiness encoded on surrogate
+         socket_error    one-shot connected-UDP asynchronous error
          trace[16]       readiness/operation diagnostic ring
          hash_next       bucket chain
          owner_next      owner-local session list
@@ -394,6 +397,18 @@ bucket[index(fd)]
 
 Registry membership is protected by a mutex. Request and close paths retain a
 session reference before releasing that mutex.
+
+Each owner also has an eight-entry, owner-only UDP route-source cache:
+
+~~~text
+udp_source_cache[i]
+  peer address + IPv6 scope    route key; destination port ignored
+  selected source IP          copied from one blocking VCL probe
+  family + valid bit
+~~~
+
+Application sessions reuse the source IP but retain independent ephemeral
+ports and VLS handles.
 
 ### 11.1 Corruption-control map
 
@@ -407,6 +422,7 @@ session reference before releasing that mutex.
 | VLS handle used under the wrong pthread TLS | VCL worker-local heap/TLS state | Immutable `session.owner`; every `vls_*` executes on that owner | Owner-affinity assertions and counters |
 | Executable mapping left writable | Patched code and thunk bytes | Thunks are emitted RW and changed to RX before `.text` is redirected | Target-policy and mapping audit |
 | Partial code patch | Mixed raw/redirected control flow | Counted and logged today | Still a P0 blocker: transactional install/rollback |
+| Shared C layout changed but one object stayed stale | Heap session record and every following field | Dispatcher build emits `-MMD -MP` header dependencies; clean rebuild validated the corrected layout | CI clean/incremental build parity |
 
 ## 12. Goroutine, owner, and VPP-worker mapping
 
@@ -601,6 +617,12 @@ sequenceDiagram
     G->>O: bind(local address, possibly port 0)
     O->>O: choose ephemeral port if requested
     G->>O: sendto(payload, destination)
+    alt wildcard source and owner route-cache miss
+        O->>V: temporary blocking UDP connect
+        V-->>O: selected local IP
+        O->>O: cache source by destination route
+    end
+    O->>V: set selected IP + this socket's port
     O->>V: vls_sendto(payload, converted endpoint)
     G->>O: recvfrom(buffer)
     O->>V: vls_recvfrom(buffer, endpoint output)
@@ -610,6 +632,28 @@ sequenceDiagram
 
 Each datagram retains its own boundary and peer address.
 
+### 18.3 Connected UDP error delivery
+
+~~~mermaid
+sequenceDiagram
+    participant N as VPP IPv4 ICMP path
+    participant V as VCL/VLS
+    participant O as Owner
+    participant S as Surrogate
+    participant G as Go UDPConn
+
+    N->>V: connected UDP RESET
+    V-->>O: EPOLLERR + EPOLLHUP
+    O->>O: socket_error = ECONNREFUSED
+    O->>S: assert armed readiness
+    S-->>G: Go netpoll wake
+    G->>O: read/write or SO_ERROR
+    O-->>G: one-shot ECONNREFUSED
+~~~
+
+The tested VPP has no corresponding IPv6 ICMP handler, so this is an
+IPv4-only verified path.
+
 ## 19. HTTP over TCP
 
 ~~~mermaid
@@ -617,7 +661,7 @@ flowchart LR
     HC["Go http.Client"] --> TR["http.Transport"]
     TR --> TCP["net.TCPConn"]
     TCP --> FP["Fastpath TCP path"]
-    FP --> VPP["Routed VPP TCP"]
+    FP --> VPP["VPP session transport<br/>routed TCP or app-local CT"]
     VPP --> HS["Go http.Server"]
 
     KA["Keep-alive mode"] --> REUSE["Reuse ~CONC persistent TCP sessions"]

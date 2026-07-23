@@ -10,6 +10,7 @@ BUILD_DIR := $(abspath ./build)
 SRC := src/addr.c src/api_native.c src/lifecycle_native.c \
        src/pool_native.c src/registry_native.c
 OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC))
+DEP := $(OBJ:.o=.d)
 
 # Pull VPP flags via pkg-config; the repo's pkgconfig/ dir is prepended in
 # the top-level Makefile. Fail loudly if it isn't resolvable.
@@ -42,7 +43,12 @@ $(LIB): $(OBJ) | $(BIN_DIR)
 	@echo "[dispatcher] built $@"
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(CPPFLAGS) -MMD -MP -c -o $@ $<
+
+# Session and request layouts are shared across translation units. Rebuild
+# every affected object when one of those headers changes; stale layouts can
+# otherwise link successfully and corrupt heap/session state at runtime.
+-include $(DEP)
 
 $(BUILD_DIR):
 	mkdir -p $@

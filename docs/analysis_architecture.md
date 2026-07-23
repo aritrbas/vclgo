@@ -1,6 +1,6 @@
 # Architecture decision record
 
-Last updated: 2026-07-22.
+Last updated: 2026-07-23.
 
 This record captures the decisions behind **Approach #4**, the native
 Frida-Gum fastpath implemented by this repository.
@@ -32,6 +32,7 @@ stack tracing, and error behavior under 100+ goroutines and multi-worker VPP.
 | D10 | Support connected and unconnected UDP explicitly | Accepted/tested |
 | D11 | Use one authoritative app detach at terminal exit | Accepted/tested |
 | D12 | Separate cut-through diagnostics from routed acceptance | Accepted |
+| D13 | Keep wildcard UDP route-source caching owner-local | Accepted/tested routed |
 
 ## D1. Preload is delivery, not libc interposition
 
@@ -128,6 +129,19 @@ Same-VPP local scope selects cut-through and bypasses the TCP/UDP packet
 graph. Routed acceptance therefore uses two VPP processes, global-only VCL
 configs, and memif. Results always identify which topology was used.
 
+App-local cut-through is the intended production topology. Consequently the
+routed matrix is supporting evidence, while a separate cut-through matrix
+and live `[CT:*]` assertion are required promotion gates.
+
+## D13. Wildcard UDP route sources are owner-local
+
+VCL does not source-select `sendto` after a wildcard datagram socket is
+already in LISTEN state. One temporary connected UDP probe per owner/route
+discovers the source IP; an eight-entry owner-local cache shares that result
+across sockets while each session retains its own bound port. This avoids
+cross-thread VCL state and the high-concurrency stall caused by probing once
+per socket.
+
 ## Consequences
 
 Benefits:
@@ -153,8 +167,8 @@ Costs and limitations:
 Required test classes are:
 
 1. kernel passthrough;
-2. cut-through payload and deadline regression;
-3. routed TCP, UDP, and HTTP;
+2. cut-through payload, deadline, UDP, and higher-protocol regression;
+3. routed TCP, UDP, HTTP, TLS, HTTP/2, and gRPC supporting evidence;
 4. ABI/error/negative-path checks;
 5. close and terminal detach with zero VPP residue;
 6. async preemption and Go stack trace safety;

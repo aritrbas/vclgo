@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -59,8 +60,8 @@ func mmapSixthArgumentProbe() error {
 	return nil
 }
 
-func dialTCP(addr string, timeout time.Duration) (*net.TCPConn, error) {
-	c, err := net.DialTimeout("tcp", addr, timeout)
+func dialTCP(network, addr string, timeout time.Duration) (*net.TCPConn, error) {
+	c, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +102,8 @@ func echoOnce(c *net.TCPConn, payload []byte, timeout time.Duration) error {
 	return nil
 }
 
-func sendfileProbe(addr string, timeout time.Duration) error {
-	c, err := dialTCP(addr, timeout)
+func sendfileProbe(network, addr string, timeout time.Duration) error {
+	c, err := dialTCP(network, addr, timeout)
 	if err != nil {
 		return err
 	}
@@ -164,8 +165,8 @@ func sendfileProbe(addr string, timeout time.Duration) error {
 	return nil
 }
 
-func closeRangeProbe(addr string, timeout time.Duration) error {
-	c, err := dialTCP(addr, timeout)
+func closeRangeProbe(network, addr string, timeout time.Duration) error {
+	c, err := dialTCP(network, addr, timeout)
 	if err != nil {
 		return err
 	}
@@ -219,8 +220,92 @@ func closeRangeProbe(addr string, timeout time.Duration) error {
 	return nil
 }
 
+func refusedProbe(network, addr string, timeout time.Duration) error {
+	c, err := dialTCP(network, addr, timeout)
+	if err == nil {
+		c.Close()
+		return fmt.Errorf("connect to unused endpoint unexpectedly succeeded")
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return fmt.Errorf("connect timed out instead of returning ECONNREFUSED: %w", err)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("connect error=%v, want ECONNREFUSED", err)
+	}
+	return nil
+}
+
+func halfCloseProbe(network, addr string, timeout time.Duration) error {
+	c, err := dialTCP(network, addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	payload := []byte("vclgo-half-close-payload")
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	if _, err := c.Write(payload); err != nil {
+		return fmt.Errorf("write before CloseWrite: %w", err)
+	}
+	if err := c.CloseWrite(); err != nil {
+		return fmt.Errorf("CloseWrite: %w", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(c, got); err != nil {
+		return fmt.Errorf("read after CloseWrite: %w", err)
+	}
+	if !bytes.Equal(got, payload) {
+		return fmt.Errorf("half-close echo mismatch")
+	}
+	one := make([]byte, 1)
+	if n, err := c.Read(one); n != 0 || !errors.Is(err, io.EOF) {
+		return fmt.Errorf("final read=(%d,%v), want (0,EOF)", n, err)
+	}
+	return nil
+}
+
+func peerResetProbe(network, addr string, timeout time.Duration) error {
+	c, err := dialTCP(network, addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "echo_client: peer-reset probe ready")
+	payload := make([]byte, 256*1024)
+	if _, err := rand.Read(payload); err != nil {
+		return err
+	}
+	for sent := 0; sent < len(payload); {
+		n, err := c.Write(payload[sent:])
+		if err != nil {
+			if errors.Is(err, syscall.ECONNRESET) {
+				return nil
+			}
+			return fmt.Errorf("reset probe write: %w", err)
+		}
+		sent += n
+	}
+	one := make([]byte, 1)
+	_, err = c.Read(one)
+	if err == nil {
+		return fmt.Errorf("read succeeded after peer termination")
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return fmt.Errorf("read timed out instead of observing peer reset: %w", err)
+	}
+	if !errors.Is(err, syscall.ECONNRESET) {
+		return fmt.Errorf("peer termination error=%v, want ECONNRESET", err)
+	}
+	return nil
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9876", "server address")
+	network := flag.String("network", "tcp", "dial network: tcp, tcp4, or tcp6")
 	conc := flag.Int("conc", 8, "concurrent connections")
 	msgs := flag.Int("msgs", 32, "messages per connection")
 	size := flag.Int("size", 4096, "bytes per message")
@@ -235,6 +320,12 @@ func main() {
 		"verify sendfile translation to a VCL-owned TCP connection")
 	closeRangeTest := flag.Bool("close-range-probe", false,
 		"verify close_range VCL lifecycle and flag semantics")
+	refusedTest := flag.Bool("refused-probe", false,
+		"require ECONNREFUSED from an unused TCP endpoint")
+	halfCloseTest := flag.Bool("half-close-probe", false,
+		"verify CloseWrite followed by echo read and EOF")
+	peerResetTest := flag.Bool("peer-reset-probe", false,
+		"wait for a peer process termination and require ECONNRESET")
 	flag.Parse()
 	effectiveDialTimeout := *dialTimeout
 	if effectiveDialTimeout <= 0 {
@@ -248,17 +339,38 @@ func main() {
 		return
 	}
 	if *sendfileTest {
-		if err := sendfileProbe(*addr, effectiveDialTimeout); err != nil {
+		if err := sendfileProbe(*network, *addr, effectiveDialTimeout); err != nil {
 			log.Fatal(err)
 		}
 		fmt.Fprintln(os.Stderr, "echo_client: sendfile probe OK")
 		return
 	}
 	if *closeRangeTest {
-		if err := closeRangeProbe(*addr, effectiveDialTimeout); err != nil {
+		if err := closeRangeProbe(*network, *addr, effectiveDialTimeout); err != nil {
 			log.Fatal(err)
 		}
 		fmt.Fprintln(os.Stderr, "echo_client: close_range probe OK")
+		return
+	}
+	if *refusedTest {
+		if err := refusedProbe(*network, *addr, effectiveDialTimeout); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: connection-refused probe OK")
+		return
+	}
+	if *halfCloseTest {
+		if err := halfCloseProbe(*network, *addr, effectiveDialTimeout); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: half-close probe OK")
+		return
+	}
+	if *peerResetTest {
+		if err := peerResetProbe(*network, *addr, effectiveDialTimeout); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: peer-reset probe OK")
 		return
 	}
 
@@ -274,7 +386,7 @@ func main() {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			c, err := net.DialTimeout("tcp", *addr, effectiveDialTimeout)
+			c, err := net.DialTimeout(*network, *addr, effectiveDialTimeout)
 			if err != nil {
 				log.Printf("[%d] dial: %v", id, err)
 				errors.Add(1)

@@ -37,25 +37,35 @@ for path in "$VCLGO_BIN/examples/echo_server" "$VCLGO_BIN/examples/echo_client";
     fi
 done
 
-if [ -z "${VCL_CONFIG:-}" ] || [ ! -f "$VCL_CONFIG" ]; then
-    echo "run_smoke_fastpath.sh: set VCL_CONFIG to a readable VCL configuration" >&2
-    exit 2
-fi
-
 PORT="${PORT:-9876}"
+TCP_NETWORK="${TCP_NETWORK:-tcp}"
+SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:$PORT}"
+CLIENT_ADDR="${CLIENT_ADDR:-$SERVER_ADDR}"
+SERVER_VCL_CONFIG="${SERVER_VCL_CONFIG:-${VCL_CONFIG:-}}"
+CLIENT_VCL_CONFIG="${CLIENT_VCL_CONFIG:-${VCL_CONFIG:-}}"
 LOG_DIR="${LOG_DIR:-/tmp/vclgo-smoke-fastpath}"
 CLIENT_TIMEOUT="${CLIENT_TIMEOUT:-30}"
 mkdir -p "$LOG_DIR"
 ulimit -c unlimited 2>/dev/null || true
 
+for config in "$SERVER_VCL_CONFIG" "$CLIENT_VCL_CONFIG"; do
+    if [ -z "$config" ] || [ ! -f "$config" ]; then
+        echo "run_smoke_fastpath.sh: server/client VCL config is not readable: $config" >&2
+        exit 2
+    fi
+done
+
 # Preload settings shared between server + client. Route all VCL traffic
 # through the fastpath library so it is exercised at both endpoints.
 run_fastpath() {
+    local config=$1
+    shift
     echo "[run_fastpath] cmd: $*" >&2
     local -a env_pairs=(
         "LD_LIBRARY_PATH=$VPP_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         "LD_PRELOAD=$VCLGO_GUM_LIB"
-        "VCL_CONFIG=${VCL_CONFIG:-}"
+        "VCL_CONFIG=$config"
+        "VCLGO_WORKERS=${VCLGO_WORKERS:-4}"
         "VCLGO_LOG=${VCLGO_LOG:-1}"
         "GOTRACEBACK=${GOTRACEBACK:-crash}"
     )
@@ -76,8 +86,9 @@ TRACKED_PIDS=()
 
 spawn_bg() {
     local logfile=$1
-    shift
-    setsid bash -c 'run_fastpath "$@"' _ "$@" >"$logfile" 2>&1 &
+    local config=$2
+    shift 2
+    setsid bash -c 'run_fastpath "$@"' _ "$config" "$@" >"$logfile" 2>&1 &
     SPAWN_PID=$!
     TRACKED_PIDS+=("$SPAWN_PID")
 }
@@ -115,9 +126,10 @@ trap cleanup EXIT INT TERM HUP
 export -f run_fastpath
 
 echo "[smoke-fp] using fastpath lib: $VCLGO_GUM_LIB"
-echo "[smoke-fp] starting fastpath echo server on 127.0.0.1:$PORT"
-spawn_bg "$LOG_DIR/server.log" \
-    "$VCLGO_BIN/examples/echo_server" -addr "127.0.0.1:$PORT"
+echo "[smoke-fp] starting fastpath echo server on $SERVER_ADDR ($TCP_NETWORK)"
+spawn_bg "$LOG_DIR/server.log" "$SERVER_VCL_CONFIG" \
+    "$VCLGO_BIN/examples/echo_server" \
+    -network "$TCP_NETWORK" -addr "$SERVER_ADDR"
 SERVER_PID=$SPAWN_PID
 
 ready=0
@@ -141,9 +153,10 @@ echo "[smoke-fp] running fastpath client"
 # Keep this smallest smoke path free of an extra wrapper process. The
 # constructor now recognizes non-Go helpers before VCL initialization, so
 # timeout is safe where the longer stress harnesses need it.
-if run_fastpath \
+if run_fastpath "$CLIENT_VCL_CONFIG" \
     "$VCLGO_BIN/examples/echo_client" \
-    -addr "127.0.0.1:$PORT" -conc 4 -msgs 8 -size 1024 \
+    -network "$TCP_NETWORK" -addr "$CLIENT_ADDR" \
+    -conc "${TCP_CONC:-4}" -msgs "${TCP_MSGS:-8}" -size "${TCP_SIZE:-1024}" \
     >"$LOG_DIR/client.log" 2>&1
 then
     echo "[smoke-fp] TCP echo OK"
@@ -157,20 +170,77 @@ else
 fi
 
 echo "[smoke-fp] checking six-argument raw syscall fallback"
-run_fastpath "$VCLGO_BIN/examples/echo_client" -mmap-probe \
+run_fastpath "$CLIENT_VCL_CONFIG" "$VCLGO_BIN/examples/echo_client" -mmap-probe \
     >"$LOG_DIR/mmap-probe.log" 2>&1
 grep 'mmap sixth-argument probe OK' "$LOG_DIR/mmap-probe.log"
 
 echo "[smoke-fp] checking sendfile on a VCL-owned output fd"
-run_fastpath "$VCLGO_BIN/examples/echo_client" \
-    -addr "127.0.0.1:$PORT" -timeout "${CLIENT_TIMEOUT}s" -sendfile-probe \
+run_fastpath "$CLIENT_VCL_CONFIG" "$VCLGO_BIN/examples/echo_client" \
+    -network "$TCP_NETWORK" -addr "$CLIENT_ADDR" \
+    -timeout "${CLIENT_TIMEOUT}s" -sendfile-probe \
     >"$LOG_DIR/sendfile-probe.log" 2>&1
 grep 'sendfile probe OK' "$LOG_DIR/sendfile-probe.log"
 
 echo "[smoke-fp] checking close_range lifecycle and flag modes"
-run_fastpath "$VCLGO_BIN/examples/echo_client" \
-    -addr "127.0.0.1:$PORT" -timeout "${CLIENT_TIMEOUT}s" -close-range-probe \
+run_fastpath "$CLIENT_VCL_CONFIG" "$VCLGO_BIN/examples/echo_client" \
+    -network "$TCP_NETWORK" -addr "$CLIENT_ADDR" \
+    -timeout "${CLIENT_TIMEOUT}s" -close-range-probe \
     >"$LOG_DIR/close-range-probe.log" 2>&1
 grep 'close_range probe OK' "$LOG_DIR/close-range-probe.log"
+
+echo "[smoke-fp] checking TCP half-close"
+run_fastpath "$CLIENT_VCL_CONFIG" "$VCLGO_BIN/examples/echo_client" \
+    -network "$TCP_NETWORK" -addr "$CLIENT_ADDR" \
+    -timeout "${CLIENT_TIMEOUT}s" -half-close-probe \
+    >"$LOG_DIR/half-close-probe.log" 2>&1
+grep 'half-close probe OK' "$LOG_DIR/half-close-probe.log"
+
+if [ -n "${REFUSED_ADDR:-}" ]; then
+    echo "[smoke-fp] checking connection-refused delivery from $REFUSED_ADDR"
+    run_fastpath "$CLIENT_VCL_CONFIG" "$VCLGO_BIN/examples/echo_client" \
+        -network "$TCP_NETWORK" -addr "$REFUSED_ADDR" \
+        -timeout "${CLIENT_TIMEOUT}s" -refused-probe \
+        >"$LOG_DIR/refused-probe.log" 2>&1
+    grep 'connection-refused probe OK' "$LOG_DIR/refused-probe.log"
+fi
+
+# The reset server consumes one byte, deliberately leaves the rest of a
+# 256-KiB write unread, and closes. VPP's TCP close path must therefore emit
+# RST; EOF is not accepted as an equivalent result.
+if [ "${RESET_PROBE:-0}" = 1 ]; then
+    RESET_SERVER_ADDR="${RESET_SERVER_ADDR:-$SERVER_ADDR}"
+    RESET_CLIENT_ADDR="${RESET_CLIENT_ADDR:-$RESET_SERVER_ADDR}"
+    spawn_bg "$LOG_DIR/reset-server.log" "$SERVER_VCL_CONFIG" \
+        "$VCLGO_BIN/examples/echo_server" \
+        -network "$TCP_NETWORK" -addr "$RESET_SERVER_ADDR" -reset-after-read
+    RESET_SERVER_PID=$SPAWN_PID
+    reset_ready=0
+    for _ in $(seq 1 100); do
+        if grep -q 'echo_server: listening on' "$LOG_DIR/reset-server.log" 2>/dev/null; then
+            reset_ready=1
+            break
+        fi
+        if ! kill -0 "$RESET_SERVER_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$reset_ready" -ne 1 ]; then
+        echo "[smoke-fp] reset server failed to become ready" >&2
+        cat "$LOG_DIR/reset-server.log" >&2
+        exit 1
+    fi
+    if ! run_fastpath "$CLIENT_VCL_CONFIG" \
+        "$VCLGO_BIN/examples/echo_client" \
+        -network "$TCP_NETWORK" -addr "$RESET_CLIENT_ADDR" \
+        -timeout "${CLIENT_TIMEOUT}s" -peer-reset-probe \
+        >"$LOG_DIR/reset-client.log" 2>&1
+    then
+        echo "[smoke-fp] reset delivery failed" >&2
+        cat "$LOG_DIR/reset-client.log" >&2
+        exit 1
+    fi
+    grep 'peer-reset probe OK' "$LOG_DIR/reset-client.log"
+fi
 
 echo "[smoke-fp] OK"

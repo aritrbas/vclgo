@@ -42,6 +42,7 @@ for path in "$VCLGO_BIN/examples/udp_echo_server" \
 done
 
 PORT="${PORT:-9877}"
+UDP_NETWORK="${UDP_NETWORK:-udp}"
 SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:$PORT}"
 CLIENT_LOCAL_ADDR="${CLIENT_LOCAL_ADDR:-127.0.0.1:0}"
 SERVER_VCL_CONFIG="${SERVER_VCL_CONFIG:-${VCL_CONFIG:-}}"
@@ -131,7 +132,8 @@ export -f run_fastpath
 echo "[smoke-udp-fp] using fastpath lib: $VCLGO_GUM_LIB"
 echo "[smoke-udp-fp] starting UDP echo server on $SERVER_ADDR"
 spawn_bg "$LOG_DIR/server.log" "$SERVER_VCL_CONFIG" \
-    "$VCLGO_BIN/examples/udp_echo_server" -addr "$SERVER_ADDR"
+    "$VCLGO_BIN/examples/udp_echo_server" \
+    -network "$UDP_NETWORK" -addr "$SERVER_ADDR"
 SERVER_PID=$SPAWN_PID
 
 ready=0
@@ -168,7 +170,7 @@ run_case() {
     if run_fastpath "$CLIENT_VCL_CONFIG" \
         timeout "$CASE_TIMEOUT" \
         "$VCLGO_BIN/examples/udp_echo_client" \
-        -addr "$SERVER_ADDR" "$@" \
+        -network "$UDP_NETWORK" -addr "$SERVER_ADDR" "$@" \
         >"$LOG_DIR/client-$label.log" 2>&1
     then
         grep '^udp_echo_client:' "$LOG_DIR/client-$label.log" | tail -1
@@ -187,5 +189,25 @@ run_case connected -conc "$UDP_CONC" -msgs "$UDP_MSGS" -size "$UDP_SIZE"
 # Unconnected UDP path: ListenPacket/WriteTo/ReadFrom == bind + sendto + recvfrom.
 run_case unconnected -conc "$UDP_CONC" -msgs "$UDP_MSGS" -size "$UDP_SIZE" \
     -local "$CLIENT_LOCAL_ADDR" -unconnected
+
+# Optional strict asynchronous-error gate. The target must be a routed
+# address with no UDP listener; a timeout is a failure, not a pass.
+if [ -n "${ICMP_ERROR_ADDR:-}" ]; then
+    ICMP_ERROR_NETWORK="${ICMP_ERROR_NETWORK:-$UDP_NETWORK}"
+    echo "[smoke-udp-fp] ICMP/UDP error delivery over $ICMP_ERROR_NETWORK from $ICMP_ERROR_ADDR"
+    if run_fastpath "$CLIENT_VCL_CONFIG" timeout "$CASE_TIMEOUT" \
+        "$VCLGO_BIN/examples/udp_echo_client" \
+        -network "$ICMP_ERROR_NETWORK" -addr "$ICMP_ERROR_ADDR" \
+        -timeout "${ICMP_ERROR_TIMEOUT:-5s}" -icmp-error-probe \
+        >"$LOG_DIR/client-icmp-error.log" 2>&1
+    then
+        grep 'ICMP error probe OK' "$LOG_DIR/client-icmp-error.log"
+    else
+        rc=$?
+        echo "[smoke-udp-fp] FAIL (ICMP/error delivery rc=$rc)" >&2
+        cat "$LOG_DIR/client-icmp-error.log" >&2
+        exit 1
+    fi
+fi
 
 echo "[smoke-udp-fp] OK"

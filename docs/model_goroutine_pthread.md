@@ -1,6 +1,6 @@
 # Goroutine, pthread, and VCL ownership model
 
-Last updated: 2026-07-22.
+Last updated: 2026-07-23.
 
 This is the normative concurrency model for Approach #4. The key statement is:
 
@@ -121,7 +121,9 @@ until they complete.
 UDP uses the same session-owner rule. Connected UDP peer state is owner-only.
 An unconnected datagram carries its destination/source per operation;
 connected `write` and `getpeername` use the cached peer. Port-0 ephemeral
-selection and collision retry also execute on the owner.
+selection and collision retry also execute on the owner. Wildcard datagram
+source selection uses an eight-entry cache on that owner; neither its
+temporary probe handle nor its cached route state crosses VCL worker TLS.
 
 ## Process lifecycle
 
@@ -167,9 +169,12 @@ listeners may be more important than merely increasing `VCLGO_WORKERS`.
 ## Evidence and remaining proof obligations
 
 The model has passed 128 concurrent cut-through TCP echo sessions, 100
-simultaneous deadlines, routed 128-way UDP, and routed 100/128-way HTTP.
+simultaneous deadlines, routed 128-way UDP, and a routed 100-way
+TCP/UDP/TLS/HTTP2/gRPC matrix.
 
-Still required are long-duration 100–1,000-goroutine runs, listener-sharding
-measurements, higher protocols, fault injection, and a Go-version matrix. See
+The production target is app-local cut-through. Its UDP and higher-protocol
+coverage is still missing, and prior HTTP cut-through churn failed in the
+tested VPP branch. Also required are long-duration 100–1,000-goroutine runs,
+listener-sharding measurements, fault injection, and a Go-version matrix. See
 [status.md](status.md), [plan.md](plan.md), and
 [test_topology.md](test_topology.md).

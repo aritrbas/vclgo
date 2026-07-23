@@ -1,6 +1,6 @@
 # Concurrency analysis: Go scheduling versus VCL TLS
 
-Last updated: 2026-07-22.
+Last updated: 2026-07-23.
 
 This document explains the reasoning behind the normative model in
 [model_goroutine_pthread.md](model_goroutine_pthread.md).
@@ -102,11 +102,12 @@ explicit reuse-port behavior. It must be tested rather than assumed.
 
 ## Topology matters to concurrency evidence
 
-The 128-connection echo and 100-deadline tests currently exercise VCL
-cut-through on one VPP. The routed HTTP tests exercise TCP across two VPPs,
-and the routed UDP tests exercise connected and packet-style concurrency.
-These cover different transport paths and are intentionally reported
-separately in [test_topology.md](test_topology.md).
+The 128-connection echo and 100-deadline tests exercise VCL cut-through on
+one VPP. The completed HTTP/TLS/HTTP2/gRPC and UDP matrix exercises two-VPP
+routed transport over memif. These cover different transport paths and are
+reported separately in [test_topology.md](test_topology.md). Because
+app-local cut-through is the production target, routed concurrency evidence
+cannot substitute for the missing cut-through protocol/churn matrix.
 
 ## Stack and register concurrency
 
@@ -133,6 +134,6 @@ the dispatcher/owner stacks.
 ## Evidence still needed
 
 Current evidence is summarized in [status.md](status.md). The model still
-needs multi-hour preemption/load testing, multiple Go versions, target
-container validation, higher protocols, error/fault injection, and
-listener-sharding measurements.
+needs the app-local UDP/higher-protocol matrix, multi-hour preemption/load
+testing, multiple Go versions, target-container validation, error/fault
+injection, and listener-sharding measurements.

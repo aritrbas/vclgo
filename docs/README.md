@@ -1,6 +1,6 @@
 # vclgo documentation
 
-Last synchronized with code and tests: 2026-07-22.
+Last synchronized with code and tests: 2026-07-23.
 
 The root of this directory documents the only implementation in the current
 tree: **Approach #4, the native Frida-Gum fastpath**.
@@ -28,8 +28,10 @@ tree: **Approach #4, the native Frida-Gum fastpath**.
 - Same-VPP local scope is called **VCL cut-through**. It is never presented
   as TCP/UDP packet-dataplane validation.
 - Two-VPP global scope over memif is called **routed acceptance**.
-- Implemented behavior is separated from tested behavior. For example, IPv6
-  paths exist, but the recorded routed acceptance matrix is IPv4.
+- Implemented behavior is separated from tested behavior. Both the established
+  IPv4 baseline and the completed IPv6/TLS/HTTP2/gRPC expansion are recorded
+  explicitly in [status.md](status.md), including the tested VPP's upstream
+  IPv6-ICMP limitation.
 - Known production blockers remain visible in
   [status.md](status.md) and [analysis_bugs.md](analysis_bugs.md).
 - Machine-code examples name the Go version and binary used to obtain them.

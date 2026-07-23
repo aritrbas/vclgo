@@ -1,12 +1,16 @@
 # Adoption guide
 
-Last updated: 2026-07-22.
+Last updated: 2026-07-23.
 
 This guide covers the **Approach #4 Frida-Gum fastpath** selected with
 `libvclgo_gum_vcl.so`. It is the only backend built by this repository.
 
 Read [status.md](status.md) and [test_topology.md](test_topology.md) before
 using a test result as deployment evidence.
+
+The intended production topology is same-VPP app-local VCL cut-through. The
+current routed memif matrix is supporting evidence only; it does not qualify
+that production path.
 
 ## 1. Fit
 
@@ -29,7 +33,7 @@ Approach #4 is a reasonable candidate when:
 | `net.ListenPacket` / `ReadFrom` / `WriteTo` | VCL; routed concurrency test passed |
 | IPv4/IPv6 INET sockets | VCL for supported stream/datagram types |
 | Unix sockets and unrelated families | Kernel |
-| TLS/HTTP2/gRPC | Expected to layer over TCP, but dedicated soaks remain open |
+| TLS/HTTP2/gRPC | Routed IPv6 matrix passed: 3,200 HTTP/1.1, 3,200 HTTP/2, 100 cancellations, and 3,200 gRPC RPCs |
 | `TCPConn.File` / descriptor duplication | Unsupported for VCL-owned fds |
 | Regular-file `sendfile` to VCL TCP | Supported; covered by the fastpath smoke |
 | `close_range` | Close and `CLOEXEC` supported; `UNSHARE` rejected while VCL is active |
@@ -153,9 +157,12 @@ must fail deployment validation even if the application appears to start.
 
 1. Run with `VCL_CONFIG` unset and confirm kernel behavior is unchanged.
 2. Run the one-VPP smoke/concurrency tests and label them cut-through.
-3. Create the two-VPP global-scope topology.
-4. Run routed UDP and routed HTTP in both keepalive modes.
-5. Query both VPPs for application/session residue after shutdown.
+3. Before production promotion, run the full same-VPP UDP and
+   HTTP/TLS/HTTP2/gRPC/error/churn matrix and assert live VPP session output
+   contains `[CT:*]`.
+4. Create the two-VPP global-scope topology as an independent routed check.
+5. Run routed UDP and routed HTTP in both keepalive modes.
+6. Query each tested VPP for application/session residue after shutdown.
 
 Commands and the exact meaning of each step are in
 [test_topology.md](test_topology.md).
@@ -197,7 +204,9 @@ Active init/teardown/reinit in one process is not supported.
 | VCL init/app attach failure | Wrong app socket or library/VPP mismatch | Compare config, sockets, build prefix, and permissions |
 | Multiple owners rejected | VLS mode 2 unavailable | Enable `multi-thread-workers`; verify matching VPP/VCL |
 | Local echo passes, routed test fails | Cut-through masked a routing problem | Verify both memifs, addresses, FIB, and global-only configs |
+| Wildcard UDP source is `::`/`0.0.0.0` on the wire | Unsupported VCL build or route-source selection failure | Require the current owner-local source cache; capture both VPP traces and dispatcher logs |
 | UDP bind/connect error | Wrong routed address or stale process/config | Check endpoint config and VPP app/session state |
+| IPv6 UDP port-unreachable times out | Tested VPP has no IPv6 branch in `udp_connection_handle_icmp()` | Use the strict IPv4 gate; do not claim IPv6 ICMP error delivery until VPP implements it |
 | HTTP uses a proxy | Proxy environment bypasses test address | Set `NO_PROXY` and `no_proxy` |
 | `unexpected return pc` / incomplete traceback | Fastpath stack/unwinder invariant violation | Stop deployment; save core, logs, Go/VPP versions |
 | VPP crashes only under same-VPP HTTP churn | Known cut-through-path class on tested VPP branch | Reproduce on VPP; do not treat routed success as a CT fix |
@@ -219,12 +228,16 @@ The current routed UDP/HTTP and cut-through concurrency results are a lab
 checkpoint. Before production use, close the open items in
 [plan.md](plan.md), especially:
 
+- reproduce and fix the known same-VPP HTTP cut-through churn crash;
+- pass the complete app-local UDP/HTTP/TLS/HTTP2/gRPC/error matrix while
+  asserting `[CT:*]` sessions and zero cleanup residue;
 - make required patch installation atomic and fail closed;
 - contain invalid syscall pointers and return `EFAULT` instead of faulting a dispatcher pthread;
 - prove or enforce the borrowed Go-buffer lifetime across owner execution;
 - target Go-version and container-policy matrices;
-- routed raw-TCP, TLS, HTTP/2, and gRPC tests;
+- repeat the green routed raw-TCP/TLS/HTTP2/gRPC matrix across clean starts;
 - extended preemption and 100–1,000-goroutine soaks;
-- reset/refused/half-close/fault-injection coverage;
+- complete fault injection beyond passing reset/refused/half-close and IPv4
+  UDP port-unreachable probes;
 - owner saturation and listener concentration measurements;
 - automated clean-topology regression tests.

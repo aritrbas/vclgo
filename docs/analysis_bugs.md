@@ -1,6 +1,6 @@
 # Bug and risk ledger
 
-Last updated: 2026-07-22.
+Last updated: 2026-07-23.
 
 This ledger is current for the **Approach #4 Frida-Gum fastpath**.
 
@@ -26,6 +26,9 @@ This ledger is current for the **Approach #4 Frida-Gum fastpath**.
 | F4-16 | S1 | `sendfile` on a VCL-owned output fell through to the surrogate | Added regular-kernel-file-to-VCL translation with exact partial-write offset accounting; 131,109-byte echo parity passes |
 | F4-17 | S1 | More than 256 immediate sites were silently mixed into the generic skipped count | Separate `non-immediate`/`overflow` counters; any overflow refuses all patching before VCL initialization |
 | F4-18 | S2 | Syscall6 trampoline bytes were dumped on every startup | Dump is now gated by `VCLGO_FASTPATH_TRACE` |
+| F4-19 | S1 | Wildcard-bound unconnected UDP transmitted with an unspecified VCL local IP, so peers could not return replies | The owner resolves a route source once per destination/owner, caches it, applies it with each socket's real bound port, and preserves wildcard `getsockname`; routed IPv6 `[::]:0` passed 100 × 8 |
+| F4-20 | S1 | VCL exposed routed IPv4 UDP port-unreachable as a generic reset or missed error | Connected-datagram error readiness is latched, reset is mapped to Linux `ECONNREFUSED`, and read/write/`SO_ERROR` consume the result; the strict routed gate passes |
+| F4-21 | S0 | Shared session-layout header edits could leave stale dispatcher objects because the C Makefile did not emit header dependencies | Added `-MMD -MP` dependency generation; this was found when impossible trace fields exposed a mixed-object layout during an incremental build |
 
 ## Audit of the reported bug list
 
@@ -59,8 +62,9 @@ This ledger is current for the **Approach #4 Frida-Gum fastpath**.
 | O4-03 | S1 | Go compiler changes produce an unrecognized wrapper prologue | Skip/log behavior exists; validate it with a Go-version matrix |
 | O4-04 | S1 | Target container denies executable mapping/text patching | Validate exact LSM/seccomp/container profile |
 | O4-05 | S1 | Long-duration preemption exposes unwinder/stack regression | Run multi-hour `SIGPROF`/high-`GOMAXPROCS` soak |
-| O4-06 | S1 | TLS/HTTP2/gRPC differs from tested HTTP/1 path | Dedicated protocol soaks remain open |
-| O4-07 | S1 | Reset/refused/half-close/VPP-restart semantics are incomplete | Add fault and error matrix |
+| O4-06 | S1 | TLS/HTTP2/gRPC differs between routed TCP and the intended app-local cut-through topology | Routed IPv6 HTTP1, HTTP2, cancellation, and gRPC pass; their cut-through equivalents are unrun |
+| O4-07 | S1 | Reset/refused/half-close/VPP-restart semantics are incomplete | IPv6 reset/refused/half-close pass; VPP restart remains open |
+| O4-20 | S1 | IPv6 UDP ICMP errors are unavailable in the tested VPP revision | vclgo's supported IPv4 mapping passes, but VPP's `udp_connection_handle_icmp()` IPv6 branch is unimplemented; retain an explicit exclusion or fix/test VPP |
 | O4-08 | S1 | Remaining unsupported syscall reaches the surrogate kernel fd | `sendfile`/`close_range` are explicit; classify or reject `splice`, uncommon `ioctl`, OOB/control operations, and the rest |
 | O4-09 | S1 | Descriptor alias semantics are absent | Keep `dup`/`TCPConn.File` unsupported or implement open-description lifetime |
 | O4-10 | S2 | 100–1,000-goroutine sustained load saturates one owner/queue | Measure queue depth, owner utilization, and VPP worker distribution |
@@ -83,6 +87,13 @@ This ledger is current for the **Approach #4 Frida-Gum fastpath**.
 | UDP unconnected | Two VPPs, memif, global scope | 128 × 8 × 512 B passed |
 | HTTP keepalive | Two VPPs, memif, global scope | 50,000/50,000 plus 12,800/12,800 passed |
 | HTTP no keepalive | Two VPPs, memif, global scope | 50,000/50,000 plus 12,800/12,800 passed |
+| IPv6 TCP/error expansion | Two VPPs, IPv6 memif | 100-way echo plus half-close/refused/reset passed |
+| IPv6 UDP expansion | Two VPPs, IPv6 memif | Connected and wildcard-unconnected 100 × 8 passed |
+| UDP port-unreachable | Two VPPs, IPv4 memif | Exact `ECONNREFUSED` passed; IPv6 remains an upstream VPP exclusion |
+| TLS/HTTP1 and HTTP2 | Two VPPs, IPv6 memif | 3,200/3,200 each; residue polling passed |
+| HTTP/2 cancellation | Two VPPs, IPv6 memif | 100/100 cancellations passed |
+| gRPC | Two VPPs, IPv6 memif | 3,200/3,200 health RPCs passed |
+| App-local cut-through protocols | One VPP, local scope | TCP smoke/concurrency/deadlines pass; UDP and higher-protocol matrix unrun; prior HTTP churn failure open |
 | Post-exit residue | Both routed VPPs | Zero applications/sessions after tested runs |
 | Build/static checks | No VPP | Build, `go test ./...`, and `go vet ./...` passed; Go reported every package as `[no test files]` |
 
@@ -131,11 +142,12 @@ application/session dumps.
 - [ ] Actual unit tests (current Go packages contain none).
 - [ ] Formal and stress-tested Go-buffer lifetime/pinning contract.
 - [ ] Invalid-pointer containment with kernel-shaped `EFAULT` results.
-- [ ] Routed raw-TCP echo gate.
-- [ ] TLS/HTTP2/gRPC matrix.
+- [x] Focused routed IPv6 raw-TCP echo/refused/reset/half-close gate.
+- [x] Complete the routed TLS/HTTP2/gRPC matrix.
+- [ ] Complete the app-local cut-through UDP/TLS/HTTP2/gRPC matrix and assert `[CT:*]` transport.
 - [ ] Go-version and target-container matrix.
 - [ ] Multi-hour preemption and 100–1,000-goroutine soak.
-- [ ] Fault/error matrix.
+- [ ] Complete fault/error matrix (routed TCP refused/reset/half-close and IPv4 UDP ICMP pass; cut-through parity, IPv6 ICMP, and VPP restart remain open).
 - [ ] Listener/owner saturation evidence.
 - [ ] Automated clean-topology regression.
 

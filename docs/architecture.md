@@ -1,6 +1,6 @@
 # vclgo architecture
 
-Last synchronized with code and tests: 2026-07-22.
+Last synchronized with code and tests: 2026-07-23.
 
 This document specifies the current native Frida-Gum fastpath from Go
 `.text` patching through VCL/VLS and multi-worker VPP. Exact instruction
@@ -466,8 +466,39 @@ converted for every outbound datagram. The source reported by
 come from a session-wide cached peer.
 
 Datagram boundaries are preserved by `vls_sendto`/`vls_recvfrom`.
-Ancillary data, full `MSG_*` semantics, multicast/broadcast coverage, ICMP
-errors, and truncation behavior are not yet qualified.
+
+A wildcard-bound VCL listener needs an additional source-selection step.
+VCL auto-selects a source only when `sendto` starts from a CLOSED session;
+Go's `ListenPacket("udp6", "[::]:0")` has already placed the session in
+LISTEN state. On the first destination per owner, the owner creates one
+short-lived blocking UDP probe, connects it to the destination, reads the
+selected local IP, closes the probe, and stores the IP in an eight-entry
+owner-local route cache. Each wildcard application socket combines that IP
+with its own bound port before `vls_sendto`. A per-session destination cache
+avoids repeating the attribute update, while `getsockname` continues to
+report the original wildcard bind.
+
+The initial per-socket probe design passed four-way testing but stalled under
+100-way VCL connect/close churn. The owner cache reduces source discovery to
+at most one probe per route per owner; routed `[::]:0` then passed 100 × 8
+datagrams.
+
+### 13.4 Connected UDP asynchronous errors
+
+For supported IPv4 ICMP destination-unreachable, VPP resets the connected UDP
+session and VCL exposes generic RESET plus `EPOLLERR|EPOLLHUP`, not the ICMP
+reason. The owner latches `ECONNREFUSED` in `socket_error` and signals the
+ordinary surrogate readiness path. The next connected datagram read/write or
+`SO_ERROR` consumes the one-shot result. A direct VCL `ECONNRESET` from
+connected datagram I/O is mapped the same way.
+
+This mapping is deliberately connected-datagram-only; TCP resets remain
+`ECONNRESET`. The tested VPP revision has no IPv6 implementation in
+`udp_connection_handle_icmp()`, so IPv6 UDP ICMP delivery is an upstream
+boundary rather than a vclgo pass.
+
+Ancillary data, full `MSG_*` semantics, multicast/broadcast coverage, and
+truncation behavior are not yet qualified.
 
 ## 14. HTTP
 
@@ -487,9 +518,15 @@ No-keep-alive tests emphasize:
 - rapid VLS session and surrogate creation;
 - close and teardown churn.
 
-The current acceptance matrix is HTTP/1.1 over routed IPv4 TCP. TLS, HTTP/2,
-gRPC, WebSocket, streaming/chunked bodies, and protocol-specific fault cases
-remain open.
+The completed routed matrix includes IPv6 TLS/HTTP1 and TLS/HTTP2 at
+3,200/3,200 requests each, 100/100 HTTP/2 cancellations, and 3,200/3,200 gRPC
+health RPCs. WebSocket, streaming/chunked bodies, and remaining protocol fault
+cases are not complete.
+
+These are two-VPP memif results, not app-local cut-through results. The
+intended production topology is cut-through, for which only TCP
+smoke/concurrency/deadline evidence is recorded. Higher-protocol cut-through
+qualification and the known VPP cut-through HTTP churn failure remain open.
 
 ## 15. Close and lifetime
 
@@ -604,6 +641,7 @@ require validation.
 | `test/run_concurrency_fastpath.sh` | Cut-through TCP payload/deadline stress |
 | `test/run_smoke_udp_fastpath.sh` | Routed connected/unconnected UDP |
 | `test/run_http_soak_fastpath.sh` | Routed HTTP keep-alive/fresh-connection soak |
+| `test/run_protocol_matrix_fastpath.sh` | Routed IPv6 protocol matrix plus IPv4 UDP error; not cut-through |
 
 ## 20. Required invariants
 

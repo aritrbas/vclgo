@@ -50,7 +50,7 @@ fastpath: dispatcher
 examples:
 	@mkdir -p "$(BIN_DIR)/examples"
 	@for ex in echo_server echo_client http_server http_client \
-	           udp_echo_server udp_echo_client; do \
+	           udp_echo_server udp_echo_client grpc_server grpc_client; do \
 	    echo "[examples] building $$ex"; \
 	    go build -o "$(BIN_DIR)/examples/$$ex" ./examples/$$ex; \
 	done

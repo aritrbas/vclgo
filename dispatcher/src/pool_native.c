@@ -29,6 +29,7 @@
 #define UDP_EPHEMERAL_MIN       32768U
 #define UDP_EPHEMERAL_MAX       60999U
 #define UDP_EPHEMERAL_ATTEMPTS  128U
+#define UDP_SOURCE_CACHE_SLOTS  8U
 
 typedef enum {
     NOP_SOCKET,
@@ -80,6 +81,14 @@ typedef struct native_request {
     struct native_request *next;
 } native_request_t;
 
+typedef struct native_udp_source_cache {
+    struct sockaddr_storage peer;
+    socklen_t peer_len;
+    uint8_t source_ip[16];
+    uint8_t is_ip4;
+    int valid;
+} native_udp_source_cache_t;
+
 typedef struct native_worker {
     unsigned id;
     int bootstrap;
@@ -104,6 +113,8 @@ typedef struct native_worker {
 
     int ep_vlsh;
     vclgo_native_session_t *sessions;
+    native_udp_source_cache_t udp_source_cache[UDP_SOURCE_CACHE_SLOTS];
+    unsigned udp_source_cache_next;
 } native_worker_t;
 
 static native_worker_t g_workers[VCLGO_MAX_WORKERS];
@@ -153,6 +164,55 @@ sockaddr_set_port(struct sockaddr_storage *addr, uint16_t port)
 }
 
 static int
+sockaddr_is_wildcard(const struct sockaddr *addr, socklen_t addrlen)
+{
+    if (addr->sa_family == AF_INET &&
+        addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *sin =
+            (const struct sockaddr_in *)addr;
+        return sin->sin_addr.s_addr == htonl(INADDR_ANY);
+    }
+    if (addr->sa_family == AF_INET6 &&
+        addrlen >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *sin6 =
+            (const struct sockaddr_in6 *)addr;
+        return IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr);
+    }
+    return 0;
+}
+
+/* UDP source routing is independent of the destination port. */
+static int
+sockaddr_same_route(const struct sockaddr_storage *cached,
+                    socklen_t cached_len, const struct sockaddr *addr,
+                    socklen_t addrlen)
+{
+    if (cached->ss_family != addr->sa_family)
+        return 0;
+    if (addr->sa_family == AF_INET &&
+        cached_len >= (socklen_t)sizeof(struct sockaddr_in) &&
+        addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *left =
+            (const struct sockaddr_in *)cached;
+        const struct sockaddr_in *right =
+            (const struct sockaddr_in *)addr;
+        return left->sin_addr.s_addr == right->sin_addr.s_addr;
+    }
+    if (addr->sa_family == AF_INET6 &&
+        cached_len >= (socklen_t)sizeof(struct sockaddr_in6) &&
+        addrlen >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *left =
+            (const struct sockaddr_in6 *)cached;
+        const struct sockaddr_in6 *right =
+            (const struct sockaddr_in6 *)addr;
+        return left->sin6_scope_id == right->sin6_scope_id &&
+               memcmp(&left->sin6_addr, &right->sin6_addr,
+                      sizeof(left->sin6_addr)) == 0;
+    }
+    return 0;
+}
+
+static int
 session_connected_endpoint(vclgo_native_session_t *session,
                            vppcom_endpt_t *endpoint, uint8_t ip[16])
 {
@@ -161,6 +221,116 @@ session_connected_endpoint(vclgo_native_session_t *session,
     return vclgo_sockaddr_to_endpt(
         (const struct sockaddr *)&session->connected_peer,
         session->connected_peer_len, endpoint, ip);
+}
+
+/*
+ * VCL selects a connectionless source only while auto-binding a CLOSED
+ * session. Go has already bound ListenPacket sockets, so an existing
+ * wildcard VCL listener would otherwise transmit with 0.0.0.0/:: as its
+ * source. Resolve the route through a short-lived blocking UDP session
+ * owned by this same pinned worker, then copy the selected address and the
+ * real bound port into the original session's application-side metadata.
+ * The VPP listener itself remains wildcard-bound for reply delivery.
+ */
+static int
+session_select_wildcard_source(vclgo_native_session_t *session,
+                               native_worker_t *worker,
+                               const struct sockaddr *peer,
+                               socklen_t peer_len,
+                               vppcom_endpt_t *peer_endpoint)
+{
+    if (!session->meta.is_dgram || !session->wildcard_bound ||
+        session->has_connected_peer)
+        return 0;
+    if (session->has_source_route_peer &&
+        sockaddr_same_route(&session->source_route_peer,
+                            session->source_route_peer_len,
+                            peer, peer_len))
+        return 0;
+
+    native_udp_source_cache_t *cached = NULL;
+    for (unsigned i = 0; i < UDP_SOURCE_CACHE_SLOTS; i++) {
+        native_udp_source_cache_t *candidate =
+            &worker->udp_source_cache[i];
+        if (candidate->valid &&
+            sockaddr_same_route(&candidate->peer,
+                                candidate->peer_len, peer, peer_len)) {
+            cached = candidate;
+            break;
+        }
+    }
+
+    if (!cached) {
+        vls_handle_t probe = vls_create(VPPCOM_PROTO_UDP, 0);
+        if (probe < 0)
+            return (int)probe;
+
+        int rv = vls_connect(probe, peer_endpoint);
+        vppcom_endpt_t probe_local;
+        uint8_t probe_ip[16] = {0};
+        if (rv >= 0) {
+            memset(&probe_local, 0, sizeof(probe_local));
+            probe_local.ip = probe_ip;
+            uint32_t probe_len = sizeof(probe_local);
+            rv = vls_attr(probe, VPPCOM_ATTR_GET_LCL_ADDR,
+                          &probe_local, &probe_len);
+        }
+        (void)vls_close(probe);
+        if (rv < 0)
+            return rv;
+
+        cached = &worker->udp_source_cache[
+            worker->udp_source_cache_next++ % UDP_SOURCE_CACHE_SLOTS];
+        memset(cached, 0, sizeof(*cached));
+        socklen_t route_len = sockaddr_size(peer, peer_len);
+        memcpy(&cached->peer, peer, route_len);
+        cached->peer_len = route_len;
+        cached->is_ip4 = probe_local.is_ip4;
+        memcpy(cached->source_ip, probe_ip,
+               probe_local.is_ip4 ? 4U : 16U);
+        cached->valid = 1;
+    }
+
+    vppcom_endpt_t local_endpoint;
+    memset(&local_endpoint, 0, sizeof(local_endpoint));
+    local_endpoint.ip = cached->source_ip;
+    local_endpoint.is_ip4 = cached->is_ip4;
+
+    if (session->bound_addr.ss_family == AF_INET) {
+        const struct sockaddr_in *sin =
+            (const struct sockaddr_in *)&session->bound_addr;
+        local_endpoint.port = sin->sin_port;
+    } else {
+        const struct sockaddr_in6 *sin6 =
+            (const struct sockaddr_in6 *)&session->bound_addr;
+        local_endpoint.port = sin6->sin6_port;
+    }
+
+    uint32_t endpoint_len = sizeof(local_endpoint);
+    int rv = vls_attr(session->vlsh, VPPCOM_ATTR_SET_LCL_ADDR,
+                      &local_endpoint, &endpoint_len);
+    if (rv < 0)
+        return rv;
+
+    socklen_t copy_len = sockaddr_size(peer, peer_len);
+    memset(&session->source_route_peer, 0,
+           sizeof(session->source_route_peer));
+    memcpy(&session->source_route_peer, peer, copy_len);
+    session->source_route_peer_len = copy_len;
+    session->has_source_route_peer = 1;
+    return 0;
+}
+
+static int
+session_take_socket_error(vclgo_native_session_t *session,
+                          native_request_t *request)
+{
+    if (!session->socket_error)
+        return 0;
+    request->rv = -1;
+    request->error_value = session->socket_error;
+    session->socket_error = 0;
+    return -1;
 }
 
 static void
@@ -196,6 +366,9 @@ worker_reset(native_worker_t *worker, unsigned id)
     worker->detach_only = 0;
     worker->ep_vlsh = -1;
     worker->sessions = NULL;
+    memset(worker->udp_source_cache, 0,
+           sizeof(worker->udp_source_cache));
+    worker->udp_source_cache_next = 0;
 }
 
 static native_worker_t *
@@ -469,6 +642,28 @@ set_request_vpp_error(native_request_t *request, int rv)
 }
 
 static int
+set_request_io_error(vclgo_native_session_t *session,
+                     native_request_t *request, int rv)
+{
+    int error_value = rv < 0 ? -rv : EIO;
+
+    /*
+     * VPP closes a connected UDP session after an IPv4 destination-
+     * unreachable notification, and VCL exposes only its generic RESET
+     * state. Linux connected UDP reports that asynchronous port error as
+     * ECONNREFUSED. VCL carries no finer reset reason, so this mapping is
+     * intentionally limited to connected datagram I/O.
+     */
+    if (error_value == ECONNRESET && session->meta.is_dgram &&
+        session->has_connected_peer)
+        error_value = ECONNREFUSED;
+
+    request->rv = -1;
+    request->error_value = error_value;
+    return -1;
+}
+
+static int
 handle_socket(native_worker_t *worker, native_request_t *request)
 {
     int stype = request->int2 & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -547,6 +742,10 @@ handle_bind(native_request_t *request)
         copy_len = sizeof(session->bound_addr);
     memcpy(&session->bound_addr, bound_addr, copy_len);
     session->bound_len = (socklen_t)copy_len;
+    session->wildcard_bound =
+        session->meta.is_dgram &&
+        sockaddr_is_wildcard(bound_addr, bound_len);
+    session->has_source_route_peer = 0;
     request->rv = 0;
     return 0;
 }
@@ -716,6 +915,8 @@ handle_read(native_worker_t *worker, native_request_t *request)
         request->rv = 0;
         return 0;
     }
+    if (session_take_socket_error(session, request) < 0)
+        return -1;
 
     ssize_t rv = vls_read(session->vlsh, request->buf, request->count);
     vclgo_session_trace(session, VCLGO_TR_READ,
@@ -726,7 +927,7 @@ handle_read(native_worker_t *worker, native_request_t *request)
             return set_request_vpp_error(request, arm_rv);
     }
     if (rv < 0)
-        return set_request_vpp_error(request, (int)rv);
+        return set_request_io_error(session, request, (int)rv);
 
     request->rv = rv;
     atomic_fetch_add(&vclgo_stat_reads, 1);
@@ -743,6 +944,8 @@ handle_write(native_worker_t *worker, native_request_t *request)
         request->rv = 0;
         return 0;
     }
+    if (session_take_socket_error(session, request) < 0)
+        return -1;
 
     if (session->meta.is_dgram && !session->has_connected_peer) {
         request->rv = -1;
@@ -759,7 +962,7 @@ handle_write(native_worker_t *worker, native_request_t *request)
             return set_request_vpp_error(request, arm_rv);
     }
     if (rv < 0)
-        return set_request_vpp_error(request, (int)rv);
+        return set_request_io_error(session, request, (int)rv);
     if (rv == 0) {
         request->rv = -1;
         request->error_value = EPIPE;
@@ -814,6 +1017,15 @@ handle_sendto(native_worker_t *worker, native_request_t *request)
         ep_arg = &endpoint;
     }
 
+    if (request->addr) {
+        int source_rv = session_select_wildcard_source(
+            session, worker, request->addr, request->addrlen, &endpoint);
+        if (source_rv < 0)
+            return set_request_vpp_error(request, source_rv);
+    }
+    if (session_take_socket_error(session, request) < 0)
+        return -1;
+
     int rv = vls_sendto(session->vlsh, (void *)request->const_buf,
                         (int)request->count, request->flags, ep_arg);
     vclgo_session_trace(session, VCLGO_TR_WRITE,
@@ -824,7 +1036,7 @@ handle_sendto(native_worker_t *worker, native_request_t *request)
             return set_request_vpp_error(request, arm_rv);
     }
     if (rv < 0)
-        return set_request_vpp_error(request, rv);
+        return set_request_io_error(session, request, rv);
 
     request->rv = rv;
     atomic_fetch_add(&vclgo_stat_writes, 1);
@@ -849,6 +1061,8 @@ handle_recvfrom(native_worker_t *worker, native_request_t *request)
         request->rv = 0;
         return 0;
     }
+    if (session_take_socket_error(session, request) < 0)
+        return -1;
 
     vppcom_endpt_t endpoint;
     uint8_t ip[16];
@@ -871,7 +1085,7 @@ handle_recvfrom(native_worker_t *worker, native_request_t *request)
             return set_request_vpp_error(request, arm_rv);
     }
     if (rv < 0)
-        return set_request_vpp_error(request, (int)rv);
+        return set_request_io_error(session, request, (int)rv);
 
     if (ep_arg && rv >= 0) {
         (void)vclgo_endpt_to_sockaddr(&endpoint, request->out_addr,
@@ -1041,9 +1255,12 @@ handle_getsockopt(native_worker_t *worker, native_request_t *request)
     vclgo_native_session_t *session = request->session;
 
     if (request->int1 == SOL_SOCKET && request->int2 == SO_ERROR) {
-        session_clear_signal(session, VCLGO_EV_WRITE);
+        session_clear_signal(session, VCLGO_EV_READ | VCLGO_EV_WRITE);
         int value = 0;
-        if (session->connect_error) {
+        if (session->socket_error) {
+            value = session->socket_error;
+            session->socket_error = 0;
+        } else if (session->connect_error) {
             value = session->connect_error;
             session->connect_error = 0;
         } else if (session->connecting) {
@@ -1122,6 +1339,23 @@ static int
 handle_getname(native_request_t *request, uint32_t attr)
 {
     vclgo_native_session_t *session = request->session;
+    if (attr == VPPCOM_ATTR_GET_LCL_ADDR &&
+        session->meta.is_dgram && session->wildcard_bound &&
+        !session->has_connected_peer && session->bound_len > 0) {
+        if (!request->out_addr || !request->out_addrlen ||
+            *request->out_addrlen < session->bound_len) {
+            request->rv = -1;
+            request->error_value = EINVAL;
+            return -1;
+        }
+        memcpy(request->out_addr, &session->bound_addr,
+               session->bound_len);
+        *request->out_addrlen = session->bound_len;
+        request->rv = 0;
+        request->error_value = 0;
+        return 0;
+    }
+
     if (attr == VPPCOM_ATTR_GET_PEER_ADDR && session->meta.is_dgram) {
         if (!session->has_connected_peer) {
             request->rv = -1;
@@ -1260,6 +1494,9 @@ worker_handle_event(native_worker_t *worker,
         clear |= VCLGO_EV_WRITE;
         atomic_fetch_add(&vclgo_stat_connects, 1);
     }
+    if (!session->connecting && (delivered & VCLGO_EV_ERR) &&
+        session->meta.is_dgram && session->has_connected_peer)
+        session->socket_error = ECONNREFUSED;
 
     vclgo_session_trace(session, VCLGO_TR_EVENT,
                         (int32_t)delivered, (int32_t)clear);

@@ -19,9 +19,10 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":9877", "listen address (UDP)")
+	network := flag.String("network", "udp", "listen network: udp, udp4, or udp6")
 	flag.Parse()
 
-	pc, err := net.ListenPacket("udp", *addr)
+	pc, err := net.ListenPacket(*network, *addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *addr, err)
 	}
