@@ -30,6 +30,10 @@ no runtime backend or phase selector.
   immutable VCL owner; accepted children inherit their listener owner.
 - Connected and unconnected UDP, TCP control/data, HTTP/1, close, and terminal
   VCL application detach are implemented at the documented surface.
+- Raw fallback forwards a0–a5, `sendfile` translates regular-file input to a
+  VCL TCP output, and `close_range` preserves registry/session semantics.
+- Immediate-site capacity overflow is explicit and refuses a truncated patch
+  set before VCL initialization; Syscall6 byte dumps are trace-only.
 - The July 22 validation matrix passed cut-through TCP/deadlines and routed
   UDP/HTTP on two multi-worker VPP instances. Exact evidence is in
   [status.md](status.md).
@@ -41,18 +45,19 @@ not compensate for them.
 
 | Priority | Gate | Required completion evidence |
 |---:|---|---|
-| P0 | Forward syscall argument 6 on raw fallback | Replace the five-argument raw helper; test a known six-argument kernel syscall through both passthrough and non-owned-fd paths |
 | P0 | Make patch installation atomic | Resolve and preflight every required site first; either install the complete set or restore all modified bytes, tear VCL down, and refuse startup |
 | P0 | Add executable tests | Unit tests for ABI/result conversion, classification, registry/refcounts, address conversion, unsupported calls, and injected startup failures |
 | P0 | Prove Go-buffer lifetime | Prove that borrowed buffers remain reachable and stationary while an owner pthread uses them, or implement an explicit pin/copy contract; validate with forced GC and async preemption |
 | P0 | Prove direct-site register liveness | For every recognized immediate syscall site, prove the continuation does not consume SysV caller-saved registers or preserve the required register set explicitly |
 | P1 | Routed raw TCP | Repeatable two-VPP echo payload, deadline, reset, refused-connect, half-close, and shutdown matrix |
-| P1 | Owned-fd syscall policy | Translate or explicitly reject every relevant operation; never let operations such as `sendfile`, `splice`, or unknown `ioctl` act on the surrogate as if it carried payload |
+| P1 | Owned-fd syscall policy | Translate or explicitly reject every relevant operation; `sendfile`/`close_range` are covered, while `splice`, unknown `ioctl`, OOB, and complex control-message paths remain |
+| P1 | Invalid-pointer containment | Invalid non-null buffers/iovecs/headers/sockaddrs/lengths/offsets must return `EFAULT`, never SIGSEGV a dispatcher pthread |
 | P1 | Constructor compatibility | Supported Go-version matrix, PIE/non-PIE and stripped binaries, wrapper-layout checks, rollback tests, and explicit unsupported-binary behavior |
 | P1 | Runtime safety soak | Multi-hour asynchronous-preemption/profiling run at high `GOMAXPROCS` and 100–1,000 goroutines with core/log scanning |
 | P1 | Protocol matrix | TLS, HTTP/2, gRPC, IPv6, large bodies, cancellation, slow peers, and error propagation |
 | P1 | Lifecycle/fault matrix | VPP restart, application-socket loss, resource exhaustion, signal termination, active connection shutdown, and startup failures |
 | P1 | Deployment matrix | Exact production VPP/VCL revision, container image, hard `RLIMIT_NOFILE`, executable-memory policy, LSM, capabilities, and shared-memory permissions |
+| P2 | Fork boundary | Detect/reject forked-child VCL inheritance or implement a tested at-fork reset contract |
 | P1 | Cut-through defect | Isolate and fix the same-VPP heavy HTTP churn crash in the tested VPP branch, or explicitly exclude that topology |
 | P2 | Listener scaling | Measure the single-listener owner hot spot; add and test listener sharding/reuse-port if required |
 | P2 | Observability | Export patch, dispatch, queue-depth, wake, error, owner/session, and teardown counters with actionable alerts |
@@ -72,7 +77,8 @@ The following are not acceptable substitutes:
 - `go test ./...` reported as unit coverage while packages say
   `[no test files]`;
 - startup that logs a skipped required patch and continues;
-- successful TCP/HTTP tests used to infer six-argument raw-syscall safety;
+- focused a5/sendfile/close-range probes used to infer safety for every other
+  syscall, pointer, or concurrency case;
 - a successful short soak used as a substitute for a Go-pointer lifetime proof;
 - a configured number of VCL owners used to infer even session or VPP-worker
   distribution.

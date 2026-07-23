@@ -15,8 +15,209 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
+
+const (
+	sysCloseRange         = 436 // linux/amd64 __NR_close_range
+	closeRangeUnshare     = 1 << 1
+	closeRangeCloseOnExec = 1 << 2
+	vclgoReservedFDBase   = 0x000f0000
+	vclgoReservedFDLimit  = 0x00100000
+)
+
+func mmapSixthArgumentProbe() error {
+	f, err := os.CreateTemp("", "vclgo-mmap-probe-")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	defer f.Close()
+
+	pageSize := syscall.Getpagesize()
+	want := make([]byte, pageSize*2)
+	for i := 0; i < pageSize; i++ {
+		want[i] = 0x41
+		want[pageSize+i] = 0x42
+	}
+	if _, err := f.Write(want); err != nil {
+		return err
+	}
+
+	mapped, err := syscall.Mmap(int(f.Fd()), int64(pageSize), pageSize,
+		syscall.PROT_READ, syscall.MAP_PRIVATE)
+	if err != nil {
+		return fmt.Errorf("mmap at sixth-argument offset %d: %w", pageSize, err)
+	}
+	defer syscall.Munmap(mapped)
+	if len(mapped) != pageSize || mapped[0] != 0x42 || mapped[len(mapped)-1] != 0x42 {
+		return fmt.Errorf("mmap used the wrong offset: first=%#x last=%#x",
+			mapped[0], mapped[len(mapped)-1])
+	}
+	return nil
+}
+
+func dialTCP(addr string, timeout time.Duration) (*net.TCPConn, error) {
+	c, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	tcp, ok := c.(*net.TCPConn)
+	if !ok {
+		c.Close()
+		return nil, fmt.Errorf("dial returned %T, want *net.TCPConn", c)
+	}
+	return tcp, nil
+}
+
+func tcpFD(c *net.TCPConn) (uintptr, error) {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var fd uintptr
+	if err := raw.Control(func(v uintptr) { fd = v }); err != nil {
+		return 0, err
+	}
+	return fd, nil
+}
+
+func echoOnce(c *net.TCPConn, payload []byte, timeout time.Duration) error {
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	if _, err := c.Write(payload); err != nil {
+		return err
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(c, got); err != nil {
+		return err
+	}
+	if !bytes.Equal(got, payload) {
+		return fmt.Errorf("echo mismatch: got %d bytes", len(got))
+	}
+	return nil
+}
+
+func sendfileProbe(addr string, timeout time.Duration) error {
+	c, err := dialTCP(addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	fd, err := tcpFD(c)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.CreateTemp("", "vclgo-sendfile-probe-")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	defer f.Close()
+	payload := make([]byte, 128*1024+37)
+	for i := range payload {
+		payload[i] = byte(i*31 + 7)
+	}
+	if _, err := f.Write(payload); err != nil {
+		return err
+	}
+
+	offset := int64(0)
+	sent := 0
+	deadline := time.Now().Add(timeout)
+	for sent < len(payload) {
+		n, err := syscall.Sendfile(int(fd), int(f.Fd()), &offset,
+			len(payload)-sent)
+		sent += n
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("sendfile timed out after %d bytes", sent)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("sendfile after %d bytes: %w", sent, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("sendfile made no progress after %d bytes", sent)
+		}
+	}
+	if offset != int64(len(payload)) {
+		return fmt.Errorf("sendfile offset=%d, want %d", offset, len(payload))
+	}
+	if err := c.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(c, got); err != nil {
+		return err
+	}
+	if !bytes.Equal(got, payload) {
+		return fmt.Errorf("sendfile echo mismatch")
+	}
+	return nil
+}
+
+func closeRangeProbe(addr string, timeout time.Duration) error {
+	c, err := dialTCP(addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	fd, err := tcpFD(c)
+	if err != nil {
+		return err
+	}
+	if fd < vclgoReservedFDBase || fd >= vclgoReservedFDLimit {
+		return fmt.Errorf("connection fd %#x is outside the VCL reserved range", fd)
+	}
+
+	// Unsharing a thread's fd table cannot be reconciled with the process-wide
+	// VCL registry. It must fail without closing the session.
+	_, _, errno := syscall.Syscall6(sysCloseRange, fd, fd,
+		closeRangeUnshare, 0, 0, 0)
+	if errno != syscall.EOPNOTSUPP {
+		return fmt.Errorf("close_range(UNSHARE) errno=%v, want %v",
+			errno, syscall.EOPNOTSUPP)
+	}
+	if err := echoOnce(c, []byte("still-open-after-unshare"), timeout); err != nil {
+		return fmt.Errorf("connection changed after rejected UNSHARE: %w", err)
+	}
+
+	// CLOEXEC changes only the kernel surrogate's descriptor flag; VCL
+	// ownership and data-plane behavior must remain intact.
+	_, _, errno = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_SETFD, 0)
+	if errno != 0 {
+		return fmt.Errorf("clear FD_CLOEXEC: %w", errno)
+	}
+	_, _, errno = syscall.Syscall6(sysCloseRange, fd, fd,
+		closeRangeCloseOnExec, 0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("close_range(CLOEXEC): %w", errno)
+	}
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETFD, 0)
+	if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		return fmt.Errorf("FD_CLOEXEC not set: flags=%#x errno=%v", flags, errno)
+	}
+	if err := echoOnce(c, []byte("still-open-after-cloexec"), timeout); err != nil {
+		return fmt.Errorf("connection closed by CLOEXEC mode: %w", err)
+	}
+
+	_, _, errno = syscall.Syscall6(sysCloseRange, fd, fd, 0, 0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("close_range: %w", errno)
+	}
+	if _, err := c.Write([]byte("must-fail-after-close-range")); err == nil {
+		return fmt.Errorf("write succeeded after close_range")
+	}
+	return nil
+}
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9876", "server address")
@@ -28,10 +229,37 @@ func main() {
 		"connection deadline (defaults to -timeout)")
 	idleRead := flag.Bool("idle-read", false,
 		"wait for a read deadline without sending data")
+	mmapProbe := flag.Bool("mmap-probe", false,
+		"verify sixth-argument raw-syscall passthrough")
+	sendfileTest := flag.Bool("sendfile-probe", false,
+		"verify sendfile translation to a VCL-owned TCP connection")
+	closeRangeTest := flag.Bool("close-range-probe", false,
+		"verify close_range VCL lifecycle and flag semantics")
 	flag.Parse()
 	effectiveDialTimeout := *dialTimeout
 	if effectiveDialTimeout <= 0 {
 		effectiveDialTimeout = *timeout
+	}
+	if *mmapProbe {
+		if err := mmapSixthArgumentProbe(); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: mmap sixth-argument probe OK")
+		return
+	}
+	if *sendfileTest {
+		if err := sendfileProbe(*addr, effectiveDialTimeout); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: sendfile probe OK")
+		return
+	}
+	if *closeRangeTest {
+		if err := closeRangeProbe(*addr, effectiveDialTimeout); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "echo_client: close_range probe OK")
+		return
 	}
 
 	var (

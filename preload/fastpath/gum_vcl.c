@@ -85,6 +85,13 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#ifndef CLOSE_RANGE_UNSHARE
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+
 /* ============================================================
  * Section 1: shared C dispatcher
  * ============================================================
@@ -112,20 +119,83 @@ static gboolean g_passthrough;
  * Most syscalls leave %rdx untouched — we still capture it so pipe(2)
  * and friends work if they ever land here. */
 static inline void
-raw_syscall5 (long nr, long a0, long a1, long a2, long a3, long a4,
+raw_syscall6 (long nr, long a0, long a1, long a2, long a3, long a4, long a5,
               long *ret_lo, long *ret_hi)
 {
     long rax;
     long rdx_io = a2;
     register long r10 __asm__ ("r10") = a3;
     register long r8  __asm__ ("r8")  = a4;
+    register long r9  __asm__ ("r9")  = a5;
     __asm__ volatile ("syscall"
                       : "=a" (rax), "+d" (rdx_io)
                       : "0" (nr), "D" (a0), "S" (a1),
-                        "r" (r10), "r" (r8)
+                        "r" (r10), "r" (r8), "r" (r9)
                       : "rcx", "r11", "memory");
     *ret_lo = rax;
     *ret_hi = rdx_io;
+}
+
+/* Linux sendfile(2) limits one transfer to 0x7ffff000 bytes. Keep the same
+ * ceiling so `total` remains representable and callers can resume with the
+ * returned byte count exactly as they do on the kernel path. */
+#define VCLGO_SENDFILE_CHUNK (64U * 1024U)
+#define VCLGO_SENDFILE_MAX   0x7ffff000U
+
+/* Translate sendfile when the output is a VCL session. The input remains a
+ * kernel fd. pread() prevents a short VCL write from advancing the input past
+ * bytes that were not sent; after each successful VCL write we advance either
+ * the explicit offset or the input file description's offset by exactly nw. */
+static ssize_t
+dispatch_sendfile (int out_fd, int in_fd, off_t *offset, size_t count)
+{
+    uint8_t buffer[VCLGO_SENDFILE_CHUNK];
+    off_t position;
+    const int explicit_offset = offset != NULL;
+
+    if (explicit_offset) {
+        position = *offset;
+    } else {
+        position = lseek (in_fd, 0, SEEK_CUR);
+        if (position < 0) return -1;
+    }
+
+    size_t remaining = count;
+    if (remaining > VCLGO_SENDFILE_MAX) remaining = VCLGO_SENDFILE_MAX;
+    ssize_t total = 0;
+
+    while (remaining > 0) {
+        size_t chunk = remaining < sizeof (buffer) ? remaining : sizeof (buffer);
+        ssize_t nr;
+        do {
+            nr = pread (in_fd, buffer, chunk, position);
+        } while (nr < 0 && errno == EINTR);
+        if (nr < 0) return total > 0 ? total : -1;
+        if (nr == 0) return total;
+
+        ssize_t nw = vclgo_write (out_fd, buffer, (size_t) nr);
+        if (nw < 0) return total > 0 ? total : -1;
+        if (nw == 0) {
+            errno = EIO;
+            return total > 0 ? total : -1;
+        }
+        if (nw > nr) {
+            errno = EIO;
+            return total > 0 ? total : -1;
+        }
+
+        position += nw;
+        total += nw;
+        remaining -= (size_t) nw;
+        if (explicit_offset) {
+            *offset = position;
+        } else if (lseek (in_fd, position, SEEK_SET) < 0) {
+            return total;
+        }
+
+        if (nw < nr) return total;
+    }
+    return total;
 }
 
 /* Pack (lo, hi) into __int128 so SysV returns it in rax:rdx. */
@@ -250,7 +320,7 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
                                    memory_order_relaxed);
         vclgo_teardown ();
         long lo, hi;
-        raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
+        raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
         /* raw exit_group does not return */
         return pack128 (lo, hi);
     }
@@ -269,7 +339,7 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
             atomic_fetch_add_explicit (&g_disp_socket_raw, 1,
                                        memory_order_relaxed);
             long lo, hi;
-            raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
+            raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
             return pack128 (lo, hi);
         }
         atomic_fetch_add_explicit (&g_disp_socket_routed, 1,
@@ -278,13 +348,53 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
         return posix_to_kernel (rv);
     }
 
+#ifdef __NR_close_range
+    /* close_range is range-shaped rather than fd-first. Closing only the
+     * kernel surrogates would strand their VLS sessions in the registry, so
+     * close exact VCL owners before asking the kernel to close the range.
+     * CLOSE_RANGE_CLOEXEC changes flags only and must retain VCL ownership.
+     * Per-thread fd-table unsharing cannot be represented by our process-wide
+     * registry, so reject it whenever VCL is active. */
+    if (nr == __NR_close_range) {
+        unsigned int first = (unsigned int) a0;
+        unsigned int last = (unsigned int) a1;
+        unsigned int flags = (unsigned int) a2;
+        const unsigned int supported = CLOSE_RANGE_UNSHARE |
+                                       CLOSE_RANGE_CLOEXEC;
+        if (first > last || (flags & ~supported) != 0) {
+            return pack128 (-EINVAL, 0);
+        }
+        if (!g_passthrough && (flags & CLOSE_RANGE_UNSHARE) != 0)
+            return pack128 (-EOPNOTSUPP, 0);
+
+        unsigned int low = first > VCLGO_FD_BASE ? first : VCLGO_FD_BASE;
+        unsigned int high = last < VCLGO_FD_LIMIT - 1U
+                                ? last : VCLGO_FD_LIMIT - 1U;
+        if (!g_passthrough && low <= high) {
+            for (unsigned int candidate = low;; candidate++) {
+                if (vclgo_owns_fd ((int) candidate)) {
+                    if ((flags & CLOSE_RANGE_CLOEXEC) == 0 &&
+                        vclgo_close ((int) candidate) < 0 &&
+                        vclgo_owns_fd ((int) candidate))
+                        return posix_to_kernel (-1);
+                }
+                if (candidate == high) break;
+            }
+        }
+
+        long lo, hi;
+        raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
+        return pack128 (lo, hi);
+    }
+#endif
+
     /* For every other fd-first syscall: gate on ownership. Anything
      * not touching a VCL-owned fd goes straight to the kernel. */
     int fd = (int) a0;
     if (!vclgo_owns_fd (fd)) {
         atomic_fetch_add_explicit (&g_disp_raw, 1, memory_order_relaxed);
         long lo, hi;
-        raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
+        raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
         trace ("raw", nr, a0, a1, lo, 0);
         return pack128 (lo, hi);
     }
@@ -344,6 +454,11 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
     case __NR_readv:
         rv = dispatch_readv (fd, (const struct iovec *) a1, (int) a2);
         break;
+#ifdef __NR_sendfile
+    case __NR_sendfile:
+        rv = dispatch_sendfile (fd, (int) a1, (off_t *) a2, (size_t) a3);
+        break;
+#endif
     case __NR_sendto:
         /* sendto(fd, buf, len, flags, addr, addrlen).
          * For connected sockets (TCP or connected UDP) a4/a5 are
@@ -422,7 +537,7 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
              * work against the kernel surrogate fd exposed by the
              * dispatcher, so pass them through to the kernel. */
             long lo, hi;
-            raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
+            raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
             return pack128 (lo, hi);
         }
         break;
@@ -438,7 +553,7 @@ vclgo_dispatch_impl (long nr, long a0, long a1, long a2, long a3, long a4,
          * translated and currently falls through to the kernel against the
          * surrogate fd. This behavior is a documented production gap. */
         long lo, hi;
-        raw_syscall5 (nr, a0, a1, a2, a3, a4, &lo, &hi);
+        raw_syscall6 (nr, a0, a1, a2, a3, a4, a5, &lo, &hi);
         return pack128 (lo, hi);
     }
     }
@@ -782,7 +897,8 @@ typedef struct {
     m2_site_t      sites[VCLGO_MAX_M2_SITES];
     size_t         n_sites;
     size_t         n_disasm;
-    size_t         n_skipped;
+    size_t         n_non_immediate;
+    size_t         n_overflow;
 } m2_state_t;
 
 typedef struct { const uint8_t *bytes; size_t len; } patch_payload_t;
@@ -819,7 +935,7 @@ find_m2_sites (m2_state_t *st)
         if (insn->id != X86_INS_SYSCALL) continue;
         st->n_disasm++;
         const uint8_t *sc = (const uint8_t *) (uintptr_t) insn->address;
-        if (sc < st->text_lo + 7) { st->n_skipped++; continue; }
+        if (sc < st->text_lo + 7) { st->n_non_immediate++; continue; }
         uint8_t mov_len = 0;
         uint32_t nr = 0;
         if (sc[-5] == 0xB8) {                           /* mov $NR, %eax */
@@ -830,9 +946,12 @@ find_m2_sites (m2_state_t *st)
             mov_len = 7;
             memcpy (&nr, sc - 4, 4);
         } else {
-            st->n_skipped++; continue;
+            st->n_non_immediate++; continue;
         }
-        if (st->n_sites >= VCLGO_MAX_M2_SITES) { st->n_skipped++; continue; }
+        if (st->n_sites >= VCLGO_MAX_M2_SITES) {
+            st->n_overflow++;
+            continue;
+        }
         st->sites[st->n_sites++] = (m2_site_t){
             .syscall_addr = (uint8_t *) sc, .nr = nr, .mov_len = mov_len
         };
@@ -1040,11 +1159,12 @@ emit_syscall6_tramp (uint8_t *tramp, const wrapper_t *w,
     /* push %r11  (fake return address = post) */
     tramp[o++] = 0x41; tramp[o++] = 0x53;
     /* jmp rel32 shim  (NOT call — shim's ret will pop post) */
+    uint8_t *jmp_at = tramp + o;
     tramp[o++] = 0xE9;
     int64_t rel = (int64_t) (uintptr_t) shim_addr -
-                  ((int64_t) (uintptr_t) (tramp + o - 1) + 5);
+                  ((int64_t) (uintptr_t) jmp_at + 5);
     int32_t rel32 = (int32_t) rel;
-    memcpy (tramp + o, &rel32, 4); o += 4;
+    memcpy (jmp_at + 1, &rel32, 4); o += 4;
 }
 
 static gboolean
@@ -1123,8 +1243,17 @@ vclgo_gum_ctor (void)
     }
     find_m2_sites (&st);
     fprintf (stderr,
-             "[vclgo/gum] M2: disasm=%zu patchable=%zu skipped=%zu\n",
-             st.n_disasm, st.n_sites, st.n_skipped);
+             "[vclgo/gum] M2: disasm=%zu patchable=%zu "
+             "non-immediate=%zu overflow=%zu\n",
+             st.n_disasm, st.n_sites, st.n_non_immediate, st.n_overflow);
+    if (st.n_overflow != 0) {
+        fprintf (stderr,
+                 "[vclgo/gum] immediate-site table overflow (%zu beyond %u) "
+                 "— refusing a partial patch set\n",
+                 st.n_overflow, VCLGO_MAX_M2_SITES);
+        gum_deinit_embedded ();
+        return;
+    }
 
     /* --- Wrapper discovery --- */
     size_t n_wrappers_resolved = 0;
@@ -1246,17 +1375,17 @@ vclgo_gum_ctor (void)
             emit_identity_wrapper_tramp (w->tramp, w);
         w_slot++;
     }
-    /* One-shot verification dump of Syscall6 tramp bytes so we can eyeball
-     * the actual emitted code once at ctor time. Useful when investigating
-     * ABI/stack invariants; safe to keep even in release since it fires
-     * exactly once at process start. */
-    for (size_t i = 0; i < VCLGO_N_WRAPPERS; i++) {
-        wrapper_t *w = &g_wrappers[i];
-        if (w->entry == NULL || !w->is_syscall6) continue;
-        fprintf (stderr, "[vclgo/gum]   S6 tramp @ %p:", w->tramp);
-        for (size_t k = 0; k < 32; k++)
-            fprintf (stderr, " %02x", w->tramp[k]);
-        fprintf (stderr, "\n");
+    /* Byte-level diagnostics are intentionally opt-in: normal production
+     * startup should not emit a raw code dump to stderr. */
+    if (g_trace) {
+        for (size_t i = 0; i < VCLGO_N_WRAPPERS; i++) {
+            wrapper_t *w = &g_wrappers[i];
+            if (w->entry == NULL || !w->is_syscall6) continue;
+            fprintf (stderr, "[vclgo/gum]   S6 tramp @ %p:", w->tramp);
+            for (size_t k = 0; k < 32; k++)
+                fprintf (stderr, " %02x", w->tramp[k]);
+            fprintf (stderr, "\n");
+        }
     }
     gum_mprotect (page, alloc_size, GUM_PAGE_RX);
 

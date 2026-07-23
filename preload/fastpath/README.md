@@ -39,7 +39,7 @@ exec /absolute/path/to/go-application
 | Code generation | Allocate an 8 KiB near-text region; emit per-site thunks, wrapper trampolines, and one shared shim |
 | ABI bridge | Convert Go/Linux syscall registers to SysV C arguments, including stack argument `a5` |
 | Stack safety | Enter C dispatch on a 512 KiB pthread-local mapping and restore the Go stack before returning |
-| Dispatch | Route supported VCL-owned TCP/UDP operations to the native dispatcher; raw-call the kernel otherwise |
+| Dispatch | Route supported VCL-owned TCP/UDP operations to the native dispatcher; preserve all six arguments on raw kernel calls |
 | Go return path | Resume the original Go `.text` result/error translation without a trampoline return PC |
 | Lifecycle | Initialize VCL only after recognizing a Go target; coordinate terminal application detach |
 
@@ -55,16 +55,19 @@ Run initial validation with `VCLGO_LOG=1` and require:
 [vclgo/gum] patched M2:<patched>/<discovered> wrappers:<patched>/<resolved>
 ```
 
-Any incomplete required patch set is a deployment failure even though the
-current constructor only logs individual skips/failures.
+An immediate-site table overflow is separated from non-immediate sites and
+refuses patching before VCL initialization. Any other incomplete required
+patch set is a deployment failure even though the constructor still only
+logs individual write failures or unresolved wrappers.
 
 ## Boundaries
 
-This remains a laboratory implementation. In particular, the raw-kernel
-fallback does not yet forward syscall argument 6, and patch installation is
-not atomic. Those are production blockers. Compatibility, protocol,
-endurance, fault-injection, listener-scaling, and observability gates are
-tracked in [status](../../docs/status.md).
+This remains a laboratory implementation. Raw-kernel argument six,
+`sendfile`, and `close_range` now have live regressions, but patch installation
+is not atomic and arbitrary invalid user pointers are not safely contained as
+`EFAULT`. Compatibility, protocol, endurance, fault-injection,
+listener-scaling, deployment-policy, and observability gates are tracked in
+[status](../../docs/status.md).
 
 Detailed machine-code, memory, register, and stack layouts are in
 [text patching](../../docs/text_patching.md); the end-to-end design is in

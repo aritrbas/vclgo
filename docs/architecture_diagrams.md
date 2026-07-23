@@ -134,6 +134,10 @@ allocation formula:
   allocated = 2 * native page size = normally 8192 bytes
 ~~~
 
+If discovery finds more than 256 immediate-pattern sites, startup reports the
+overflow separately and returns before VCL initialization; it does not patch a
+truncated prefix.
+
 Every direct `CALL rel32` and every `JMP rel32` is checked for signed
 32-bit reachability. Allocation is requested within 1 GiB of the midpoint of
 Go `.text`.
@@ -348,7 +352,11 @@ preemption/unwinder stress remains part of production validation.
 flowchart TD
     E["nr,a0..a5"] --> EXIT{"nr == exit_group?"}
     EXIT -- yes --> TD["terminal VCL teardown"] --> KE["raw exit_group"]
-    EXIT -- no --> SOCK{"nr == socket?"}
+    EXIT -- no --> CR{"nr == close_range?"}
+    CR -- yes --> CU{"active VCL + UNSHARE?"}
+    CU -- yes --> CE["-EOPNOTSUPP"]
+    CU -- no --> CRM["close VCL owners / preserve CLOEXEC"] --> KCR["raw kernel close_range"]
+    CR -- no --> SOCK{"nr == socket?"}
     SOCK -- yes --> ROUTE{"INET/INET6 and TCP/UDP?"}
     ROUTE -- yes --> VC["create VLS session + surrogate"]
     ROUTE -- no --> KR["raw kernel socket"]
@@ -702,7 +710,8 @@ See [test_topology.md](test_topology.md) for commands and claim boundaries.
 | Individual patch failure | Count mismatch in log | Abort/rollback or all-kernel mode |
 | Near allocation failure | Constructor returns | Explicit teardown and deterministic fallback |
 | VCL owner startup failure | Initialization error | No patches; clear fatal/fallback policy |
-| Six-argument raw syscall | Not fully carried | Fix helper and add ABI tests |
+| Six-argument raw syscall | `mmap` a5 regression | Retain in supported-Go matrix |
+| Invalid application pointer | Can fault dispatcher pthread | Return `EFAULT` without process crash |
 | Unknown syscall on owned fd | Raw operation on surrogate | Explicit translate or reject |
 | Owner queue saturation | Limited logs/watchdog | Counters, latency, queue depth, alerting |
 | Listener concentration | Architectural | Shard/listen strategy and measurements |

@@ -38,6 +38,10 @@ The current hard limits are:
 | Near-allocation distance | 1 GiB from the midpoint of `.text` |
 | Thunk allocation | Two native pages, normally 8192 bytes |
 
+The 256-site bound is now fail-closed: discovery reports immediate-pattern
+misses separately from capacity overflow, and any overflow aborts before VCL
+initialization. No site beyond the table is silently left on the kernel path.
+
 The executable `.text` is never modified on disk. Only the process-private
 mapping is patched.
 
@@ -494,24 +498,32 @@ Current fail-open behavior must be understood:
 - failure after VCL initialization but before `g_did_patch` can leave
   initialization cleanup dependent on process termination.
 
+One former partial-patch case is closed: exceeding
+`VCLGO_MAX_M2_SITES` reports `overflow=N` and refuses the entire patch before
+VCL initialization. The remaining cases above still require transactional
+preflight/rollback.
+
 Production promotion requires a fail-closed policy or an explicit,
 well-tested compatibility fallback.
 
-## 11. Known six-argument raw-fallback defect
+## 11. Six-argument raw fallback
 
-The shared shim and owned UDP path carry all six syscall arguments correctly.
-The raw fallback helper is currently named `raw_syscall5` and programs only
-a0 through a4. It does not explicitly load Linux syscall argument a5 into
-`%r9`.
+The shared shim, owned UDP path, and raw fallback all carry a0 through a5.
+`raw_syscall6` explicitly binds the final argument to Linux `%r9`:
 
-This matters beyond UDP. The direct-site scanner patches runtime calls such
-as `runtime.sysMmap.abi0`, and `mmap` has six arguments. If such a site
-takes the raw fallback, its final argument is not guaranteed to reach the
-kernel correctly.
+~~~text
+C input                 Linux SYSCALL input
+nr                      rax
+a0, a1, a2              rdi, rsi, rdx
+a3, a4, a5              r10, r8, r9
+~~~
 
-This is a production blocker even though the present TCP/UDP/HTTP tests pass.
-The required correction is a true six-argument raw helper plus tests that
-exercise nonzero a5 values through every fallback branch.
+This is important beyond UDP. The scanner patches runtime calls such as
+`runtime.sysMmap.abi0`, and `mmap` uses a5 for its file offset. The fastpath
+smoke now maps the second page of a two-page file with a nonzero a5 and
+verifies its bytes both while VCL is active (the mapping fd is unowned) and
+with `VCL_CONFIG` unset in pure passthrough mode. That regression would fail
+if `%r9` were omitted.
 
 ## 12. Reproducing the examples
 
@@ -528,11 +540,12 @@ objdump -d bin/examples/echo_client |
   grep -B1 -A2 '0f 05'
 ~~~
 
-At runtime, the constructor prints the discovered counts, wrapper address,
-emitted Syscall6 thunk prefix, and successful patch totals. Acceptance logs
-must show every discovered site and resolved wrapper patched:
+At runtime, the constructor prints discovered counts, wrapper addresses, and
+successful patch totals. The emitted Syscall6 bytes are printed only when
+`VCLGO_FASTPATH_TRACE` is set. Acceptance logs must show zero overflow and
+every discovered site and resolved wrapper patched:
 
 ~~~text
-[vclgo/gum] M2: disasm=39 patchable=36 skipped=3
+[vclgo/gum] M2: disasm=39 patchable=36 non-immediate=3 overflow=0
 [vclgo/gum] patched M2:36/36 wrappers:3/3
 ~~~

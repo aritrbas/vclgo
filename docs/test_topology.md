@@ -146,7 +146,7 @@ to the intended VPP instances.
 
 | Test | Required topology | Protocol interpretation |
 |---|---|---|
-| `test/run_smoke_fastpath.sh` | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP API over cut-through; diagnostic |
+| `test/run_smoke_fastpath.sh` | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP cut-through plus nonzero-a5 `mmap`, VCL-output `sendfile`, and `close_range` regressions |
 | `test/run_concurrency_fastpath.sh` | One VPP, `vcl.native.conf`, 127.0.0.1 | TCP-shaped payload/deadlines over cut-through; diagnostic |
 | `test/run_smoke_udp_fastpath.sh` | **Acceptance requires two VPPs and separate configs/addresses** | Routed connected + unconnected UDP |
 | `test/run_http_soak_fastpath.sh` | **Acceptance requires two VPPs and separate configs/addresses** | Routed HTTP/1 over VPP TCP |
@@ -286,6 +286,16 @@ VPP instances reported no applications or sessions after endpoint exit, and
 the process/VPP logs contained none of the configured panic, fatal,
 SIGSEGV, assertion, unwinder, queue-corruption, or cut-through crash
 signatures.
+
+After the syscall fixes, the current worktree reran
+`test/run_smoke_fastpath.sh` against the same two-worker local VPP with four
+VCL owners per endpoint. TCP echo, a nonzero-a5 `mmap`, a 131,109-byte
+regular-file `sendfile` with exact echo/offset parity, and `close_range`
+`UNSHARE`/`CLOEXEC`/close semantics all passed. The post-run VPP dump showed
+no applications and no sessions on the main thread or either worker. The
+same rebuilt library then repeated 128 × 32 × 4096-byte TCP echo with exact
+16 MiB parity and 100 simultaneous 250 ms read deadlines, both with zero
+errors and zero post-run residue.
 
 These results do not include a routed raw-TCP echo test; routed HTTP supplies
 TCP transport evidence but does not replace that open gate.

@@ -146,7 +146,7 @@ if run_fastpath \
     -addr "127.0.0.1:$PORT" -conc 4 -msgs 8 -size 1024 \
     >"$LOG_DIR/client.log" 2>&1
 then
-    echo "[smoke-fp] OK"
+    echo "[smoke-fp] TCP echo OK"
     tail -4 "$LOG_DIR/client.log"
 else
     rc=$?
@@ -155,3 +155,22 @@ else
     tail -40 "$LOG_DIR/server.log" >&2
     exit 1
 fi
+
+echo "[smoke-fp] checking six-argument raw syscall fallback"
+run_fastpath "$VCLGO_BIN/examples/echo_client" -mmap-probe \
+    >"$LOG_DIR/mmap-probe.log" 2>&1
+grep 'mmap sixth-argument probe OK' "$LOG_DIR/mmap-probe.log"
+
+echo "[smoke-fp] checking sendfile on a VCL-owned output fd"
+run_fastpath "$VCLGO_BIN/examples/echo_client" \
+    -addr "127.0.0.1:$PORT" -timeout "${CLIENT_TIMEOUT}s" -sendfile-probe \
+    >"$LOG_DIR/sendfile-probe.log" 2>&1
+grep 'sendfile probe OK' "$LOG_DIR/sendfile-probe.log"
+
+echo "[smoke-fp] checking close_range lifecycle and flag modes"
+run_fastpath "$VCLGO_BIN/examples/echo_client" \
+    -addr "127.0.0.1:$PORT" -timeout "${CLIENT_TIMEOUT}s" -close-range-probe \
+    >"$LOG_DIR/close-range-probe.log" 2>&1
+grep 'close_range probe OK' "$LOG_DIR/close-range-probe.log"
+
+echo "[smoke-fp] OK"

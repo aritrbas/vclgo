@@ -8,17 +8,18 @@ Last verified: 2026-07-22.
 
 The native Frida-Gum fastpath is a strong laboratory implementation for
 unmodified Go applications using routed IPv4 TCP, UDP, and HTTP/1.1 at
-100–128-way concurrency. The complete repository matrix passes on the
-current `main` branch, but correctness gaps in raw syscall fallback and
-partial-patch handling, incomplete socket compatibility, and missing
-endurance/fault/version coverage block production promotion.
+100–128-way concurrency. The recorded repository matrix passes, and the
+current worktree passes focused raw-a5, `sendfile`, `close_range`, and TCP
+regressions. Correctness gaps in transactional patch handling and pointer
+containment, incomplete socket compatibility, and missing endurance/fault/
+version coverage block production promotion.
 
 ## Verified build
 
 | Component | Verified value |
 |---|---|
 | Repository branch | `main` |
-| Repository commit tested | `d0cbd78c394db54cfae9a586058d3bc420320e58` |
+| Source tested | Current `main` worktree based on `d0cbd78c394db54cfae9a586058d3bc420320e58` |
 | Go | `go1.26.1 linux/amd64` |
 | Kernel | `6.8.0-100-generic` |
 | VPP | `v26.10-rc0~231-g0a143dac6` |
@@ -59,7 +60,9 @@ There is no runtime phase selector. Loading
 | Multiple VCL owners | 1–64 owners | Four owners used in every live gate |
 | Multi-worker VPP/VLS | VLS mode 2 | Two workers per VPP used |
 | HTTP/1.1 | TCP transport path | Routed keep-alive and fresh-connection gates pass |
-| Kernel passthrough | Intended when `VCL_CONFIG` is unset | Six-argument fallback defect remains |
+| Kernel/raw fallback | All six Linux arguments forwarded | Nonzero-a5 `mmap` passes with active VCL and with `VCL_CONFIG` unset |
+| Regular-file `sendfile` to VCL TCP | Translated with exact offset accounting | 131,109-byte echo parity passes |
+| `close_range` | Close and `CLOEXEC`; active-VCL `UNSHARE` rejection | All three modes pass |
 | Process exit | One authoritative VCL detach | Zero routed residue observed |
 | Descriptor duplication | Explicitly unsupported | Returns `EOPNOTSUPP` |
 
@@ -73,13 +76,17 @@ There is no runtime phase selector. Loading
 | `go test ./...` | Passed | All packages report `[no test files]`; compile-only evidence |
 | `go vet ./...` | Passed | No findings |
 | `bash -n test/*.sh` | Passed | Syntax only |
-| `git diff --check` | Passed before documentation edits | Whitespace check |
+| `markdownlint README.md docs/**/*.md preload/fastpath/README.md` | Passed | Current and archived Markdown |
+| `git diff --check` | Passed | Whitespace check |
 
 ### Live network tests
 
 | Test | Topology | Load | Result |
 |---|---|---:|---|
 | TCP smoke | One VPP, local scope, cut-through | 4 × 8 × 1024 B | 32,768 B each direction, zero errors |
+| Raw syscall a5 | Active VCL and pure passthrough | `mmap`, offset one page | Correct second-page bytes in both modes |
+| VCL-output `sendfile` | One VPP, local scope, cut-through | 131,109 B | Exact echo and final offset |
+| `close_range` | One VPP, local scope, cut-through | `UNSHARE`, `CLOEXEC`, close | Correct reject/retain/close behavior |
 | TCP payload | One VPP, local scope, cut-through | 128 × 32 × 4096 B | 16 MiB each direction, zero errors |
 | TCP deadlines | One VPP, local scope, cut-through | 100 idle reads, 250 ms | All deadlines passed |
 | Connected UDP | Two VPPs, global scope, memif | 128 × 8 × 512 B | 524,288 B each direction, zero errors |
@@ -105,6 +112,9 @@ After the routed matrix:
 - The current Go 1.26.1 binary was recognized and patched.
 - Logs reported `M2:36/36` immediate sites and `wrappers:3/3`.
 - Syscall arguments and results survived the current Go/Linux/SysV ABI bridge.
+- Raw fallback delivered a nonzero sixth argument to Linux `%r9`.
+- `sendfile` bytes/offsets and `close_range` registry/session semantics passed
+  focused live regressions.
 - Four permanent VCL owners registered successfully in VLS mode 2.
 - 100+ goroutines can share the fixed owner pool without goroutine affinity.
 - VLS readiness can drive Go netpoll and deadlines through surrogate fds.
@@ -119,38 +129,34 @@ long-duration stability.
 
 ### P0 — correctness
 
-1. **Raw fallback carries only five syscall arguments.**
-   The shim delivers a0–a5 to `vclgo_dispatch_impl`, but
-   `raw_syscall5` does not explicitly load a5 into Linux `%r9`.
-   A patched six-argument syscall such as `mmap` can therefore receive an
-   incorrect final argument on the raw path. Replace it with a true
-   six-argument helper and add nonzero-a5 tests for every fallback branch.
-
-2. **Startup accepts partial patch sets.**
+1. **Startup accepts some partial patch sets.**
    Individual patch failures are counted, but startup continues; unresolved
    generic wrappers are skipped; there is no rollback. Production behavior
-   must be fail-closed or use an explicit, tested all-kernel fallback.
+   must be fail-closed or use an explicit, tested all-kernel fallback. The
+   former silent 256-site truncation is fixed: overflow now aborts before VCL
+   initialization.
 
-3. **No deterministic unit/ABI test suite exists.**
+2. **No deterministic unit/ABI test suite exists.**
    Required coverage includes register/result conversion, negative errno,
-   six-argument syscalls, direct-site return PCs, wrapper prologue rejection,
-   registry references, close/read races, readiness transitions, UDP
-   sockaddr handling, and partial initialization.
+   direct-site return PCs, wrapper prologue rejection, registry references,
+   close/read races, readiness transitions, UDP sockaddr handling, and
+   partial initialization. The live a5/sendfile/close-range probes are
+   regression evidence, not a substitute for isolated unit/fault tests.
 
-4. **Unsupported owned-fd syscalls may execute against the surrogate fd.**
-   The default path cannot silently treat operations such as `sendfile`,
-   `splice`, or an unhandled `ioctl` as if the kernel socketpair were the
-   VCL transport. Every owned-fd syscall needs explicit translate, reject, or
-   proven-surrogate semantics.
+3. **Unsupported owned-fd syscalls may execute against the surrogate fd.**
+   `sendfile` and `close_range` are now explicit, but the default path still
+   cannot silently treat operations such as `splice` or an unhandled `ioctl`
+   as if the kernel socketpair were the VCL transport. Every owned-fd syscall
+   needs explicit translate, reject, or proven-surrogate semantics.
 
-5. **Borrowed Go buffer pointers lack a formal runtime-safety proof.**
+4. **Borrowed Go buffer pointers lack a formal runtime-safety proof.**
    The owner pthread dereferences caller buffers while the submitting Go M
    waits synchronously. The request lifetime is bounded, but this path does
    not use cgo pointer instrumentation. Demonstrate reachability and
    non-movement across GC/async preemption, or introduce an explicit
    pin/copy contract, then add forced-GC and signal stress tests.
 
-6. **Immediate syscall sites lack a caller-saved-register proof.**
+5. **Immediate syscall sites lack a caller-saved-register proof.**
    A real Linux `SYSCALL` preserves more argument registers than a SysV C
    call is required to preserve. The generic wrapper's result block is
    understood, but every immediate-site continuation needs liveness
@@ -158,30 +164,44 @@ long-duration stability.
 
 ### P1 — scale and compatibility
 
-1. **One listener is one owner bottleneck.**
+1. **Invalid-pointer `EFAULT` containment is incomplete.**
+   The C dispatcher/owners directly dereference non-null application buffers,
+   iovecs, message headers, sockaddrs, socklen pointers, and `sendfile`
+   offsets. An invalid address can SIGSEGV a dispatcher pthread instead of
+   returning `EFAULT`. Add safe copy-in/copy-out or bounded fault containment.
+
+2. **One listener is one owner bottleneck.**
    Accepted sessions inherit the listener owner. The current tests prove
    correctness at 128 connections, not balanced use of all owners. Add
    listener sharding or supported reuse-port semantics and measure queue
    depth, owner CPU, and latency.
 
-2. **Same-VPP HTTP cut-through churn remains unsafe on the tested VPP.**
+3. **Same-VPP HTTP cut-through churn remains unsafe on the tested VPP.**
    High connection churn can fail in VPP cut-through accept/cleanup code.
    Routed HTTP is healthy, but local cut-through cannot be promoted until the
    VPP failure is isolated and fixed or local scope is explicitly excluded.
 
-3. **Compiler and executable compatibility is not qualified.**
+4. **Compiler and executable compatibility is not qualified.**
    Run supported Go versions, PIE/non-PIE, stripped binaries, cgo and
    non-cgo builds, race builds where possible, and rejected-prologue cases.
 
-4. **Protocol/error matrices are incomplete.**
+5. **Protocol/error matrices are incomplete.**
    Add routed raw TCP, IPv6 TCP/UDP, TLS, HTTP/2, gRPC, WebSocket, streaming
    bodies, connection refused/reset, half-close, cancellation, ICMP/error
    delivery, UDP truncation, and ancillary/control-message tests.
 
-5. **Endurance and recovery evidence is missing.**
+6. **Endurance and recovery evidence is missing.**
    Run multi-hour 100–1,000-goroutine soaks with high `GOMAXPROCS`,
    asynchronous preemption, SIGPROF, VPP restart, app-socket loss, forced
    queue pressure, allocation failures, and repeated process startup/exit.
+
+7. **Deployment executable-memory policy is unqualified.**
+   The constructor allocates RW thunk memory, changes it to RX, and asks
+   Frida-Gum to patch executable `.text` through temporary writable access.
+   Validate those `mmap`/`mprotect` operations in the exact container
+   seccomp/AppArmor/SELinux profile, together with capabilities and shared
+   memory permissions. A denying profile prevents startup; it is not a
+   latent data-plane corruption mode.
 
 ### P2 — operations and security
 
@@ -189,15 +209,18 @@ long-duration stability.
     Export patch coverage, routed/raw syscall counts, owner queue depth,
     session distribution, readiness rearm, watchdog, and teardown counters.
 
-2. **Deployment policy is unqualified.**
-    Validate the exact container image, executable-memory and
-    `mprotect` policy, LSM profile, capabilities, core-dump handling,
-    library integrity, and preload supply chain.
+2. **Process/API exclusions need enforcement.**
+    Forked-child VCL inheritance and fd aliases (`dup`, `TCPConn.File`) are
+    unsupported. They are documented and aliases fail with `EOPNOTSUPP`, but
+    fork use is not proactively detected or terminated. Ordinary
+    `net/http.Hijacker` does not itself require `TCPConn.File`; applications
+    that explicitly request a file descriptor remain outside scope.
 
-3. **Automated clean-topology CI is missing.**
+3. **Operational hardening and automated clean-topology CI are missing.**
     The two-VPP topology is currently assembled externally. Production
     promotion needs repeatable provisioning, residue checks, log scanning,
-    artifact capture, and versioned pass/fail reports.
+    artifact capture, core-dump policy, library/preload integrity controls,
+    and versioned pass/fail reports.
 
 ## Promotion rule
 

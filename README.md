@@ -152,7 +152,7 @@ The topology is part of every result:
 
 | Harness | Required interpretation |
 |---|---|
-| `test/run_smoke_fastpath.sh` | Same-VPP local cut-through TCP smoke |
+| `test/run_smoke_fastpath.sh` | Same-VPP TCP plus raw-a5, `sendfile`, and `close_range` regressions |
 | `test/run_concurrency_fastpath.sh` | Same-VPP cut-through TCP payload and deadline stress |
 | `test/run_smoke_udp_fastpath.sh` | Acceptance requires two VPPs and routed connected/unconnected UDP |
 | `test/run_http_soak_fastpath.sh` | Acceptance requires two VPPs and routed HTTP over VPP TCP |
@@ -169,13 +169,18 @@ the exact topologies, commands, and post-test checks.
   socket families remain kernel-owned.
 - `dup`, `dup2`, `dup3`, `F_DUPFD`, and `TCPConn.File` are not
   supported for VCL-owned descriptors.
-- Ancillary data, complex `sendmsg/recvmsg`, socket-specific `ioctl`,
-  `sendfile`, `splice`, and uncommon socket extensions are incomplete.
+- Regular-file-to-VCL-TCP `sendfile` is translated. Ancillary data, complex
+  `sendmsg/recvmsg`, socket-specific `ioctl`, `splice`, and uncommon socket
+  extensions remain incomplete.
 - One listener concentrates its accepted children on one VCL owner.
 - Static or privileged executables, fork inheritance, and active VCL
   teardown/reinitialization are unsupported.
-- The raw kernel fallback still needs complete six-argument syscall coverage
-  before passthrough can be treated as production-safe.
+- Raw kernel fallback carries all six syscall arguments; the smoke harness
+  verifies a nonzero `mmap` offset through argument six, and the same probe
+  passes with `VCL_CONFIG` unset in pure passthrough mode.
+- Arbitrary invalid application pointers are not yet contained and converted
+  uniformly to `EFAULT`; executable-memory/text-write policy must be qualified
+  in the target container.
 - TLS, HTTP/2, gRPC, IPv6 acceptance, fault injection, Go-version coverage,
   container policy validation, and multi-hour 100–1,000-goroutine soaks
   remain promotion gates.

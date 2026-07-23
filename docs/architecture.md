@@ -103,8 +103,10 @@ Initialization ordering matters:
 2. All requested owner pthreads must be registered before the pool accepts a
    socket request.
 3. The near mapping becomes RX before any patched entry can target it.
-4. Patch totals are logged. Current code does not yet fail closed on a
-   partial patch set; that is a production blocker.
+4. An immediate-site table overflow aborts before VCL initialization. Patch
+   totals are logged, but unresolved wrappers and individual patch-write
+   failures are not yet transactional; that remaining partial-patch case is a
+   production blocker.
 
 With `VCLGO_WORKERS > 1`, the VCL configuration must enable
 `multi-thread-workers`. Owner 0 bootstraps the VCL application; the other
@@ -147,7 +149,11 @@ arguments.
 flowchart TD
     E["dispatch(nr, a0..a5)"] --> X{"exit_group?"}
     X -- yes --> TD["terminal vclgo_teardown"] --> RK["raw kernel exit_group"]
-    X -- no --> S{"socket()?"}
+    X -- no --> CR{"close_range()?"}
+    CR -- yes --> CU{"active VCL + UNSHARE?"}
+    CU -- yes --> CER["-EOPNOTSUPP"]
+    CU -- no --> CP["close exact VCL owners<br/>or retain for CLOEXEC"] --> RCR["raw kernel close_range"]
+    CR -- no --> S{"socket()?"}
     S -- yes --> F{"AF_INET/AF_INET6<br/>TCP or UDP?"}
     F -- yes --> VS["vclgo_socket"]
     F -- no --> RS["raw kernel socket"]
@@ -180,12 +186,14 @@ registry must contain an exact live entry before the fd is considered owned.
 | `connect` | TCP async connect or synchronous connected-UDP setup |
 | `read`, `write` | Owner-local VLS data operation |
 | `readv`, `writev` | Bounded iovec loops over VCL reads/writes |
+| `sendfile` | `pread` a regular kernel input file and write to VCL; advance offsets by bytes actually sent |
 | `sendto`, `recvfrom` | Per-datagram endpoint-aware UDP path |
 | `sendmsg`, `recvmsg` | Limited iovec/name translation; no full control-message support |
 | `shutdown` | Owner-local `vls_shutdown` |
 | `getsockname`, `getpeername` | VLS attributes or cached UDP peer |
 | `setsockopt`, `getsockopt` | Supported option-to-VLS mappings |
 | `close` | Owner-serialized VLS/session/surrogate close |
+| `close_range` | Close exact VCL sessions before kernel range close; retain sessions for `CLOEXEC`; reject `UNSHARE` while VCL is active |
 
 `dup`, `dup2`, `dup3`, `F_DUPFD`, and `F_DUPFD_CLOEXEC` are
 explicitly rejected with `EOPNOTSUPP`.
@@ -499,6 +507,13 @@ An ordinary application `close(fd)`:
 Concurrent operations that lose the close race return a POSIX-shaped error;
 they do not use a freed VLS handle.
 
+`close_range(first,last,0)` performs the same exact-registry close for every
+owned fd in the overlap, then lets the kernel close ordinary descriptors and
+already-removed surrogates. `CLOSE_RANGE_CLOEXEC` changes only kernel fd flags
+and retains each VCL session. `CLOSE_RANGE_UNSHARE` is rejected with
+`EOPNOTSUPP` whenever VCL is active because one calling thread's private fd
+table cannot be reconciled with the process-wide registry.
+
 ## 16. Terminal process teardown
 
 `exit_group` is intercepted before the raw kernel exit:
@@ -521,14 +536,20 @@ bootstrap-owned VCL application destroy releases remaining VPP sessions.
 This contract applies only to process exit; normal `close` still closes one
 session.
 
+Teardown is deliberately idempotent. The lifecycle state machine permits one
+caller to win `ACTIVE -> STOPPING`; concurrent or later callers wait for or
+observe `STOPPED`. Consequently the `exit_group`, `atexit`, and preload
+destructor safety nets cannot destroy VCL state twice.
+
 Active teardown followed by reinitialization is unsupported.
 
 ## 17. Passthrough and failure containment
 
 If `VCL_CONFIG` is absent, lifecycle state becomes passthrough and no owner
-pool is created. Patches are still installed and dispatches are intended to
-execute the original raw kernel syscall. The current five-argument raw helper
-makes this path incomplete for six-argument syscalls.
+pool is created. Patches are still installed and dispatches execute the
+original raw kernel syscall through `raw_syscall6`, including Linux `%r9` for
+a5. A nonzero-offset `mmap` probe covers this path with VCL active and the fd
+unowned.
 
 If VCL initialization fails before patching, the constructor leaves the
 application unpatched. If discovery finds no Go-shaped path, it returns
@@ -543,6 +564,13 @@ Current startup is not transactional:
   marked responsible for teardown.
 
 These behaviors must be hardened before production.
+
+The dispatcher and owner currently dereference application buffers, iovecs,
+message headers, sockaddrs, socklen pointers, and `sendfile` offsets directly.
+Null pointers receive explicit checks in a few paths, but an arbitrary invalid
+non-null address can fault the dispatcher pthread instead of returning
+`EFAULT`. Uniform fault containment or safe copy-in/copy-out is still a
+production gap.
 
 ## 18. Security model
 

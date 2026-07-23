@@ -31,6 +31,8 @@ Approach #4 is a reasonable candidate when:
 | Unix sockets and unrelated families | Kernel |
 | TLS/HTTP2/gRPC | Expected to layer over TCP, but dedicated soaks remain open |
 | `TCPConn.File` / descriptor duplication | Unsupported for VCL-owned fds |
+| Regular-file `sendfile` to VCL TCP | Supported; covered by the fastpath smoke |
+| `close_range` | Close and `CLOEXEC` supported; `UNSHARE` rejected while VCL is active |
 | Ancillary control data / OOB / `splice` | Incomplete or unsupported |
 | Static executable | Cannot use `LD_PRELOAD` |
 | Stripped dynamic Go executable | Supported by instruction scanning |
@@ -217,8 +219,8 @@ The current routed UDP/HTTP and cut-through concurrency results are a lab
 checkpoint. Before production use, close the open items in
 [plan.md](plan.md), especially:
 
-- preserve all six syscall arguments on every raw-kernel fallback;
 - make required patch installation atomic and fail closed;
+- contain invalid syscall pointers and return `EFAULT` instead of faulting a dispatcher pthread;
 - prove or enforce the borrowed Go-buffer lifetime across owner execution;
 - target Go-version and container-policy matrices;
 - routed raw-TCP, TLS, HTTP/2, and gRPC tests;
